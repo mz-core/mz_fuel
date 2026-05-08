@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>mz_fuel</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main id="app" class="hidden">
+      <section class="panel">
+        <header>
+          <span>Posto</span>
+          <button id="close" type="button">Cancelar</button>
+        </header>
+
+        <div class="fuel-row">
+          <span>Combustivel atual</span>
+          <strong id="fuel">0%</strong>
+        </div>
+
+        <button id="fill" class="primary" type="button">Completar tanque</button>
+
+        <label>
+          Valor em dinheiro
+          <div class="input-row">
+            <input id="money" type="number" min="1" step="1" placeholder="Ex: 250" />
+            <button id="moneyBtn" type="button">Abastecer</button>
+          </div>
+        </label>
+
+        <label>
+          Litros
+          <div class="input-row">
+            <input id="liters" type="number" min="1" step="0.1" placeholder="Ex: 20" />
+            <button id="litersBtn" type="button">Abastecer</button>
+          </div>
+        </label>
+      </section>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>
