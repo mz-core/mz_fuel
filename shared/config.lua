@@ -104,15 +104,19 @@ Config.Notify = {
   fallback = true,
   messages = {
     refuelStarted = 'Abastecimento iniciado.',
-    refuelFinished = 'Veículo abastecido.',
+    refuelFinished = 'Veiculo abastecido.',
     refuelCanceled = 'Abastecimento cancelado.',
     noMoney = 'Dinheiro insuficiente.',
-    vehicleFull = 'O veículo já está cheio.',
-    invalidVehicle = 'Veículo inválido.',
-    jerrycanStarted = 'Usando galão de combustível.',
-    jerrycanFinished = 'Combustível adicionado.',
-    jerrycanCanceled = 'Uso do galão cancelado.',
-    noJerrycan = 'Você não possui um galão.'
+    vehicleFull = 'O veiculo ja esta cheio.',
+    invalidVehicle = 'Veiculo invalido.',
+    driverRequired = 'Entre no banco do motorista para abastecer.',
+    tooFar = 'Voce esta longe demais do posto.',
+    paymentUnavailable = 'Pagamento indisponivel.',
+    rateLimited = 'Aguarde um instante para tentar novamente.',
+    jerrycanStarted = 'Usando galao de combustivel.',
+    jerrycanFinished = 'Combustivel adicionado.',
+    jerrycanCanceled = 'Uso do galao cancelado.',
+    noJerrycan = 'Voce nao possui um galao.'
   }
 }
 

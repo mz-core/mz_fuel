@@ -14,6 +14,26 @@ local function notifyKey(key, notifyType, fallback)
   end
 end
 
+local function notifyRefuelError(reason)
+  reason = tostring(reason or '')
+
+  if reason == 'not_enough_money' then
+    notifyKey('noMoney', 'error', 'Dinheiro insuficiente.')
+  elseif reason == 'driver_required' or reason == 'left_driver_seat' or reason == 'not_driver' then
+    notifyKey('driverRequired', 'error', 'Entre no banco do motorista para abastecer.')
+  elseif reason == 'too_far' or reason == 'station_distance_invalid' then
+    notifyKey('tooFar', 'error', 'Voce esta longe demais do posto.')
+  elseif reason == 'vehicle_full' then
+    notifyKey('vehicleFull', 'inform', 'O veiculo ja esta cheio.')
+  elseif reason == 'payment_unavailable' or reason == 'invalid_price' or reason == 'config_invalid' or reason == 'payment_failed' then
+    notifyKey('paymentUnavailable', 'error', 'Pagamento indisponivel.')
+  elseif reason == 'rate_limited' then
+    notifyKey('rateLimited', 'inform', 'Aguarde um instante para tentar novamente.')
+  else
+    notifyKey('invalidVehicle', 'error', 'Veiculo invalido.')
+  end
+end
+
 local function normalizeStation(station)
   if type(station) == 'vector3' then
     return station
@@ -50,9 +70,15 @@ local function getVehiclePayload()
     return nil
   end
 
+  local netId = NetworkGetNetworkIdFromEntity(vehicle)
+  netId = tonumber(netId) or 0
+  if netId <= 0 or (type(NetworkDoesNetworkIdExist) == 'function' and not NetworkDoesNetworkIdExist(netId)) then
+    return nil
+  end
+
   return {
     plate = MZFuel.GetPlate(vehicle),
-    net_id = NetworkGetNetworkIdFromEntity(vehicle),
+    net_id = netId,
     fuel = MZFuel.GetFuel(vehicle) or 0.0
   }
 end
@@ -123,7 +149,7 @@ function MZFuelMenu.Open(vehicle, station)
   station = normalizeStation(station)
   local ok, reason = MZFuelRefuel.CanRefuel(vehicle)
   if not ok or not station then
-    notifyKey(reason == 'vehicle_full' and 'vehicleFull' or 'invalidVehicle', 'error', 'Veiculo invalido.')
+    notifyRefuelError(reason)
     return false
   end
 
@@ -143,6 +169,10 @@ function MZFuelMenu.Open(vehicle, station)
   })
 
   return true
+end
+
+function MZFuelMenu.IsBusy()
+  return MenuState.open == true or MenuState.pending == true
 end
 
 RegisterNetEvent('mz_fuel:client:openRefuelMenu', function(vehicleOrNetId, station)
@@ -166,14 +196,7 @@ RegisterNetEvent('mz_fuel:client:refuelMenuAuthorized', function(result)
   MenuState.pending = false
   result = type(result) == 'table' and result or {}
   if result.ok ~= true then
-    if result.error == 'not_enough_money' then
-      notifyKey('noMoney', 'error', 'Dinheiro insuficiente.')
-    elseif result.error == 'vehicle_full' then
-      notifyKey('vehicleFull', 'inform', 'O veiculo ja esta cheio.')
-    else
-      notifyKey('invalidVehicle', 'error', 'Veiculo invalido.')
-    end
-
+    notifyRefuelError(result.error)
     closeMenu()
     return
   end

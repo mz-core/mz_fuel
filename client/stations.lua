@@ -127,7 +127,7 @@ CreateThread(function()
       local ped = PlayerPedId()
       local coords = GetEntityCoords(ped)
 
-      for _, station in ipairs(MZFuelStations.List) do
+      for stationIndex, station in ipairs(MZFuelStations.List) do
         local distance = #(coords - station)
         if distance <= drawDistance then
           waitMs = 0
@@ -149,7 +149,9 @@ CreateThread(function()
                 if Config.Refuel and Config.Refuel.useMenu == true and MZFuelMenu and MZFuelMenu.Open then
                   MZFuelMenu.Open(vehicle, station)
                 else
-                  MZFuelRefuel.Start(vehicle, station)
+                  MZFuelRefuel.Start(vehicle, station, {
+                    stationId = stationIndex
+                  })
                 end
               end
             end

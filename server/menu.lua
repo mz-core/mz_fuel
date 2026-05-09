@@ -39,6 +39,40 @@ local function refuelConfig()
   return type(Config.Refuel) == 'table' and Config.Refuel or {}
 end
 
+local function isPositiveNumber(value)
+  value = tonumber(value)
+  return value ~= nil and value == value and value > 0.0 and value ~= math.huge
+end
+
+local function validateRefuelConfig()
+  local cfg = refuelConfig()
+  local errors = {}
+
+  if Config.Payment and Config.Payment.enabled ~= false and not isPositiveNumber(cfg.pricePerLiter) then
+    errors[#errors + 1] = 'Config.Refuel.pricePerLiter precisa ser maior que 0 quando Config.Payment.enabled=true'
+  end
+
+  if not isPositiveNumber(cfg.litersPerTick) then
+    errors[#errors + 1] = 'Config.Refuel.litersPerTick precisa ser maior que 0'
+  end
+
+  if not isPositiveNumber(cfg.tickMs) then
+    errors[#errors + 1] = 'Config.Refuel.tickMs precisa ser maior que 0'
+  end
+
+  if not isPositiveNumber(cfg.maxLitersPerRequest) then
+    errors[#errors + 1] = 'Config.Refuel.maxLitersPerRequest precisa ser maior que 0'
+  end
+
+  for _, errorMessage in ipairs(errors) do
+    print(('[mz_fuel] config invalida: %s'):format(errorMessage))
+  end
+
+  return #errors == 0
+end
+
+local RefuelConfigOk = validateRefuelConfig()
+
 local function normalizeAccount(account)
   account = tostring(account or refuelConfig().paymentAccount or 'cash'):lower()
   local aliases = Config.Payment and Config.Payment.accountAliases or {}
@@ -66,6 +100,27 @@ local function getNetVehicle(netId)
   return entity
 end
 
+local function getPlayerCurrentVehicle(source)
+  local ped = GetPlayerPed(source)
+  if not ped or ped == 0 or type(GetVehiclePedIsIn) ~= 'function' then
+    return 0
+  end
+
+  local ok, vehicle = pcall(GetVehiclePedIsIn, ped, false)
+  if not ok or not vehicle or vehicle == 0 then
+    return 0
+  end
+
+  if type(DoesEntityExist) == 'function' then
+    local existsOk, exists = pcall(DoesEntityExist, vehicle)
+    if not existsOk or exists ~= true then
+      return 0
+    end
+  end
+
+  return vehicle
+end
+
 local function getPlate(entity)
   if not entity or entity == 0 or type(GetVehicleNumberPlateText) ~= 'function' then
     return ''
@@ -77,6 +132,22 @@ local function getPlate(entity)
   end
 
   return normalizePlate(plate)
+end
+
+local function resolveVehicle(source, plate, netId)
+  plate = normalizePlate(plate)
+
+  local entity = getNetVehicle(netId)
+  if entity ~= 0 and getPlate(entity) == plate then
+    return entity
+  end
+
+  local currentVehicle = getPlayerCurrentVehicle(source)
+  if currentVehicle ~= 0 and getPlate(currentVehicle) == plate then
+    return currentVehicle
+  end
+
+  return 0
 end
 
 local function getVehicleFuel(entity, plate)
@@ -133,9 +204,9 @@ local function validateStationDistance(source, station)
 end
 
 local function validateVehicle(source, plate, netId)
-  local entity = getNetVehicle(netId)
   plate = normalizePlate(plate)
-  if entity == 0 or plate == '' or getPlate(entity) ~= plate then
+  local entity = resolveVehicle(source, plate, netId)
+  if entity == 0 or plate == '' then
     return false, 'invalid_vehicle'
   end
 
@@ -304,7 +375,7 @@ function MZFuelMenu.GetSessionLiters(source, plate, token, requestedLiters, netI
     return nil
   end
 
-  local entity = getNetVehicle(session.netId)
+  local entity = resolveVehicle(source, plate, session.netId)
   if entity == 0 or getPlate(entity) ~= normalizePlate(plate) then
     Sessions[sessionKey(source, plate, token)] = nil
     return nil
@@ -338,6 +409,11 @@ RegisterNetEvent('mz_fuel:server:requestMenuRefuel', function(payload)
   payload = type(payload) == 'table' and payload or {}
 
   if not isValidSource(src) or refuelConfig().useMenu ~= true then
+    return
+  end
+
+  if RefuelConfigOk ~= true then
+    TriggerClientEvent('mz_fuel:client:refuelMenuAuthorized', src, { ok = false, error = 'invalid_price' })
     return
   end
 

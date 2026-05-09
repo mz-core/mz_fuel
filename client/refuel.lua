@@ -9,13 +9,30 @@ local RefuelState = {
   targetLiters = nil,
   usedLiters = 0.0,
   menuSession = nil,
+  netId = 0,
+  stationId = nil,
   lastStopReason = nil
 }
+
+local RefuelConfigOk = true
 
 local function notifyKey(key, notifyType, fallback)
   if MZFuelNotify and MZFuelNotify.NotifyKey then
     MZFuelNotify.NotifyKey(key, notifyType, fallback)
   end
+end
+
+local function debugPrint(tag, fields)
+  if Config.Debug ~= true then
+    return
+  end
+
+  local parts = {}
+  for key, value in pairs(fields or {}) do
+    parts[#parts + 1] = ('%s=%s'):format(tostring(key), tostring(value))
+  end
+
+  print(('[mz_fuel][%s] %s'):format(tostring(tag), table.concat(parts, ' ')))
 end
 
 local function stopProgress()
@@ -30,10 +47,137 @@ local function startProgress(durationMs)
   end
 end
 
+local function isPositiveNumber(value)
+  value = tonumber(value)
+  return value ~= nil and value == value and value > 0.0 and value ~= math.huge
+end
+
+local function validateRefuelConfig()
+  local cfg = Config.Refuel or {}
+  local errors = {}
+
+  if Config.Payment and Config.Payment.enabled ~= false and not isPositiveNumber(cfg.pricePerLiter) then
+    errors[#errors + 1] = 'Config.Refuel.pricePerLiter precisa ser maior que 0 quando Config.Payment.enabled=true'
+  end
+
+  if not isPositiveNumber(cfg.litersPerTick) then
+    errors[#errors + 1] = 'Config.Refuel.litersPerTick precisa ser maior que 0'
+  end
+
+  if not isPositiveNumber(cfg.tickMs) then
+    errors[#errors + 1] = 'Config.Refuel.tickMs precisa ser maior que 0'
+  end
+
+  if not isPositiveNumber(cfg.maxLitersPerRequest) then
+    errors[#errors + 1] = 'Config.Refuel.maxLitersPerRequest precisa ser maior que 0'
+  end
+
+  if #errors > 0 then
+    RefuelConfigOk = false
+    for _, errorMessage in ipairs(errors) do
+      print(('[mz_fuel] config invalida: %s'):format(errorMessage))
+    end
+  end
+end
+
+local function getVehicleNetId(vehicle)
+  if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
+    return 0
+  end
+
+  local netId = NetworkGetNetworkIdFromEntity(vehicle)
+  netId = tonumber(netId) or 0
+  if netId <= 0 then
+    return 0
+  end
+
+  if type(NetworkDoesNetworkIdExist) == 'function' and not NetworkDoesNetworkIdExist(netId) then
+    return 0
+  end
+
+  return netId
+end
+
+local function getStationId(station)
+  if not station then
+    return nil
+  end
+
+  for index, configuredStation in ipairs(Config.Stations and Config.Stations.locations or {}) do
+    if #(station - configuredStation) <= 1.5 then
+      return index
+    end
+  end
+
+  return nil
+end
+
+local function debugVehicleSnapshot(tag, vehicle, extra)
+  if Config.Debug ~= true then
+    return
+  end
+
+  local exists = vehicle and vehicle ~= 0 and DoesEntityExist(vehicle)
+  local ped = PlayerPedId()
+  local plate = ''
+  local fuel = nil
+  local isDriver = false
+  local netId = 0
+
+  if exists then
+    plate = MZFuel.NormalizePlate(GetVehicleNumberPlateText(vehicle))
+    fuel = GetVehicleFuelLevel(vehicle)
+    isDriver = GetPedInVehicleSeat(vehicle, -1) == ped
+    netId = NetworkGetNetworkIdFromEntity(vehicle)
+  end
+
+  local fields = {
+    vehicle = vehicle or 0,
+    exists = exists == true,
+    netId = netId,
+    plate = plate,
+    isDriver = isDriver,
+    fuel = fuel,
+    useMenu = Config.Refuel and Config.Refuel.useMenu,
+    allowInsideVehicle = Config.Refuel and Config.Refuel.allowInsideVehicle,
+    requireDriver = Config.Refuel and Config.Refuel.requireDriver
+  }
+
+  for key, value in pairs(extra or {}) do
+    fields[key] = value
+  end
+
+  debugPrint(tag, fields)
+end
+
+local function notifyRefuelError(reason)
+  reason = tostring(reason or '')
+
+  if reason == 'not_enough_money' then
+    notifyKey('noMoney', 'error', 'Dinheiro insuficiente.')
+  elseif reason == 'driver_required' or reason == 'left_driver_seat' or reason == 'not_driver' then
+    notifyKey('driverRequired', 'error', 'Entre no banco do motorista para abastecer.')
+  elseif reason == 'too_far' or reason == 'station_distance_invalid' then
+    notifyKey('tooFar', 'error', 'Voce esta longe demais do posto.')
+  elseif reason == 'vehicle_full' then
+    notifyKey('vehicleFull', 'inform', 'O veiculo ja esta cheio.')
+  elseif reason == 'payment_unavailable' or reason == 'invalid_price' or reason == 'config_invalid' or reason == 'payment_failed' then
+    notifyKey('paymentUnavailable', 'error', 'Pagamento indisponivel.')
+  elseif reason == 'rate_limited' then
+    notifyKey('rateLimited', 'inform', 'Aguarde um instante para tentar novamente.')
+  else
+    notifyKey('invalidVehicle', 'error', 'Veiculo invalido.')
+  end
+end
+
 local function getPedVehicle()
   local ped = PlayerPedId()
+  local vehicle = GetVehiclePedIsIn(ped, false)
+  if vehicle ~= 0 and DoesEntityExist(vehicle) then
+    return vehicle
+  end
 
-  return GetVehiclePedIsIn(ped, false)
+  return 0
 end
 
 local function isPlayerDead()
@@ -58,6 +202,8 @@ local function normalizeLiters(value)
 end
 
 local function isValidRefuelVehicle(vehicle)
+  local ped = PlayerPedId()
+
   if Config.Refuel and Config.Refuel.allowInsideVehicle == false and IsPedInAnyVehicle(PlayerPedId(), false) then
     return false, 'inside_vehicle_blocked'
   end
@@ -70,8 +216,12 @@ local function isValidRefuelVehicle(vehicle)
     return false, 'vehicle_not_supported'
   end
 
-  if Config.Refuel and Config.Refuel.requireDriver == true and GetPedInVehicleSeat(vehicle, -1) ~= PlayerPedId() then
+  if Config.Refuel and Config.Refuel.requireDriver == true and GetPedInVehicleSeat(vehicle, -1) ~= ped then
     return false, 'driver_required'
+  end
+
+  if getVehicleNetId(vehicle) <= 0 then
+    return false, 'vehicle_invalid'
   end
 
   local fuel = MZFuel.GetFuel(vehicle) or 0.0
@@ -114,12 +264,14 @@ function MZFuelRefuel.Stop(reason, silent)
   RefuelState.targetLiters = nil
   RefuelState.usedLiters = 0.0
   RefuelState.menuSession = nil
+  RefuelState.netId = 0
+  RefuelState.stationId = nil
   RefuelState.lastStopReason = tostring(reason or 'stopped')
   stopProgress()
 
   if Config.Refuel and Config.Refuel.saveOnComplete ~= false and vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
     TriggerServerEvent('mz_fuel:server:saveFuel', MZFuel.GetPlate(vehicle), MZFuel.GetFuel(vehicle), {
-      net_id = NetworkGetNetworkIdFromEntity(vehicle),
+      net_id = getVehicleNetId(vehicle),
       engine = GetVehicleEngineHealth(vehicle),
       body = GetVehicleBodyHealth(vehicle),
       force = true
@@ -141,6 +293,12 @@ local function validateActiveState()
   local vehicle = RefuelState.vehicle
   if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
     MZFuelRefuel.Stop('vehicle_missing')
+    return false
+  end
+
+  RefuelState.netId = getVehicleNetId(vehicle)
+  if RefuelState.netId <= 0 then
+    MZFuelRefuel.Stop('vehicle_invalid')
     return false
   end
 
@@ -188,6 +346,14 @@ local function requestPayment()
   end
 
   local vehicle = RefuelState.vehicle
+  local netId = getVehicleNetId(vehicle)
+  if netId <= 0 then
+    notifyRefuelError('vehicle_invalid')
+    MZFuelRefuel.Stop('vehicle_invalid', true)
+    return
+  end
+
+  RefuelState.netId = netId
   local currentFuel = MZFuel.GetFuel(vehicle) or 0.0
   local missing = (tonumber(Config.MaxFuel) or 100.0) - currentFuel
   local liters = math.min(normalizeLiters(Config.Refuel and Config.Refuel.litersPerTick), missing)
@@ -203,10 +369,22 @@ local function requestPayment()
 
   RefuelState.pendingPayment = true
   startProgress(math.max(250, tonumber(Config.Refuel and Config.Refuel.tickMs) or 1000))
+
+  debugPrint('client_pay_tick', {
+    vehicle = vehicle,
+    exists = DoesEntityExist(vehicle),
+    netId = netId,
+    plate = MZFuel.GetPlate(vehicle),
+    fuelBefore = currentFuel,
+    litersRequested = liters,
+    stationId = RefuelState.stationId
+  })
+
   TriggerServerEvent('mz_fuel:server:payRefuel', {
     plate = MZFuel.GetPlate(vehicle),
     liters = liters,
-    net_id = NetworkGetNetworkIdFromEntity(vehicle),
+    net_id = netId,
+    station_id = RefuelState.stationId,
     fuel_before = currentFuel,
     menu_session = RefuelState.menuSession,
     station = RefuelState.station and {
@@ -232,15 +410,33 @@ local function runRefuelLoop()
 end
 
 function MZFuelRefuel.Start(vehicle, station, options)
-  if RefuelState.active == true then
+  if RefuelState.active == true or RefuelState.pendingPayment == true then
     return false, 'already_refueling'
+  end
+
+  if MZFuelMenu and MZFuelMenu.IsBusy and MZFuelMenu.IsBusy() then
+    return false, 'already_refueling'
+  end
+
+  if RefuelConfigOk ~= true then
+    notifyRefuelError('invalid_price')
+    return false, 'invalid_config'
   end
 
   options = type(options) == 'table' and options or {}
   vehicle = vehicle or getRefuelVehicle()
+  debugVehicleSnapshot('client_start', vehicle)
+
   local ok, reason = isValidRefuelVehicle(vehicle)
   if not ok then
+    notifyRefuelError(reason)
     return false, reason
+  end
+
+  local netId = getVehicleNetId(vehicle)
+  if netId <= 0 then
+    notifyRefuelError('vehicle_invalid')
+    return false, 'vehicle_invalid'
   end
 
   if station then
@@ -258,6 +454,8 @@ function MZFuelRefuel.Start(vehicle, station, options)
   RefuelState.targetLiters = tonumber(options.targetLiters)
   RefuelState.usedLiters = 0.0
   RefuelState.menuSession = options.menuSession
+  RefuelState.netId = netId
+  RefuelState.stationId = tonumber(options.stationId) or getStationId(station)
   RefuelState.lastStopReason = nil
 
   notifyKey('refuelStarted', 'inform', 'Abastecimento iniciado.')
@@ -288,11 +486,7 @@ RegisterNetEvent('mz_fuel:client:refuelPaid', function(result)
   result = type(result) == 'table' and result or {}
 
   if result.ok ~= true then
-    if result.error == 'not_enough_money' then
-      notifyKey('noMoney', 'error', 'Dinheiro insuficiente.')
-    else
-      notifyKey('invalidVehicle', 'error', 'Veiculo invalido.')
-    end
+    notifyRefuelError(result.error)
     MZFuelRefuel.Stop(result.error or 'payment_failed', true)
     return
   end
@@ -323,3 +517,5 @@ end)
 exports('CanRefuel', function(vehicle)
   return MZFuelRefuel.CanRefuel(vehicle)
 end)
+
+validateRefuelConfig()

@@ -43,13 +43,29 @@ local function findNearestVehicle(maxDistance)
   return nearestVehicle
 end
 
-local function startRefuelAtStation(station)
+local function startRefuelAtStation(station, stationId)
   if not station then
     return false
   end
 
   local vehicle = findNearestVehicle(tonumber(Config.Refuel and Config.Refuel.maxDistance) or 6.0)
-  if vehicle == 0 or not MZFuelRefuel.CanRefuel(vehicle) then
+  local ok, reason = false, 'vehicle_invalid'
+  if vehicle ~= 0 then
+    local canRefuel, canReason = MZFuelRefuel.CanRefuel(vehicle)
+    ok = canRefuel == true
+    reason = canReason or reason
+  end
+
+  if not ok then
+    if MZFuelNotify and MZFuelNotify.NotifyKey then
+      if reason == 'driver_required' or reason == 'not_driver' then
+        MZFuelNotify.NotifyKey('driverRequired', 'error', 'Entre no banco do motorista para abastecer.')
+      elseif reason == 'vehicle_full' then
+        MZFuelNotify.NotifyKey('vehicleFull', 'inform', 'O veiculo ja esta cheio.')
+      else
+        MZFuelNotify.NotifyKey('invalidVehicle', 'error', 'Veiculo invalido.')
+      end
+    end
     return false
   end
 
@@ -57,7 +73,9 @@ local function startRefuelAtStation(station)
     return MZFuelMenu.Open(vehicle, station)
   end
 
-  return MZFuelRefuel.Start(vehicle, station)
+  return MZFuelRefuel.Start(vehicle, station, {
+    stationId = stationId
+  })
 end
 
 local function canUseTarget()
@@ -218,7 +236,7 @@ end
 RegisterNetEvent('mz_fuel:client:interactRefuelStation', function(index)
   index = tonumber(index) or 0
   local station = Config.Stations and Config.Stations.locations and Config.Stations.locations[index] or nil
-  startRefuelAtStation(station)
+  startRefuelAtStation(station, index)
 end)
 
 CreateThread(function()
