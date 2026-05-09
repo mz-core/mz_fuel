@@ -86,7 +86,7 @@ Config.Refuel = {
 }
 
 Config.JerryCan = {
-  enabled = false,
+  enabled = true,
   item = 'WEAPON_PETROLCAN',
   inventoryItem = 'jerrycan',
   litersPerUse = 10.0,
