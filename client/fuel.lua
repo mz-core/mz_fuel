@@ -18,7 +18,36 @@ local function normalizePlate(plate)
 end
 
 local function isVehicleEntity(vehicle)
-  return vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) and IsEntityAVehicle(vehicle)
+  if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
+    return false
+  end
+
+  if type(GetEntityType) == 'function' then
+    local entityType = GetEntityType(vehicle)
+    if tonumber(entityType) == 2 then
+      return true
+    end
+
+    if tonumber(entityType) and tonumber(entityType) > 0 then
+      return false
+    end
+  end
+
+  if type(IsEntityAVehicle) == 'function' then
+    local ok, isVehicle = pcall(IsEntityAVehicle, vehicle)
+    if ok then
+      return isVehicle == true
+    end
+  end
+
+  if type(GetVehicleClass) == 'function' then
+    local ok, class = pcall(GetVehicleClass, vehicle)
+    if ok and tonumber(class) ~= nil then
+      return true
+    end
+  end
+
+  return false
 end
 
 local function requestControl(vehicle, timeoutMs)
@@ -138,6 +167,35 @@ function MZFuel.GetFuel(vehicle)
   return clampFuel(Config.DefaultFuel)
 end
 
+function MZFuel.GetVehicleNetId(vehicle, timeoutMs)
+  if not isVehicleEntity(vehicle) then
+    return 0
+  end
+
+  local netId = NetworkGetNetworkIdFromEntity(vehicle)
+  netId = tonumber(netId) or 0
+  if netId > 0 and (type(NetworkDoesNetworkIdExist) ~= 'function' or NetworkDoesNetworkIdExist(netId)) then
+    return netId
+  end
+
+  if type(NetworkRegisterEntityAsNetworked) ~= 'function' then
+    return 0
+  end
+
+  NetworkRegisterEntityAsNetworked(vehicle)
+  local expiresAt = GetGameTimer() + (tonumber(timeoutMs) or 500)
+  repeat
+    Wait(0)
+    netId = tonumber(NetworkGetNetworkIdFromEntity(vehicle)) or 0
+  until (netId > 0 and (type(NetworkDoesNetworkIdExist) ~= 'function' or NetworkDoesNetworkIdExist(netId))) or GetGameTimer() >= expiresAt
+
+  if netId > 0 and (type(NetworkDoesNetworkIdExist) ~= 'function' or NetworkDoesNetworkIdExist(netId)) then
+    return netId
+  end
+
+  return 0
+end
+
 function MZFuel.SetFuel(vehicle, amount, options)
   if not isVehicleEntity(vehicle) then
     return false
@@ -208,6 +266,10 @@ end)
 
 exports('RemoveFuel', function(vehicle, amount)
   return MZFuel.RemoveFuel(vehicle, amount)
+end)
+
+exports('GetVehicleNetId', function(vehicle)
+  return MZFuel.GetVehicleNetId(vehicle)
 end)
 
 RegisterNetEvent('mz_fuel:client:setFuel', function(vehicleOrNetId, amount)

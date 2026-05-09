@@ -70,11 +70,8 @@ local function getVehiclePayload()
     return nil
   end
 
-  local netId = NetworkGetNetworkIdFromEntity(vehicle)
+  local netId = MZFuel.GetVehicleNetId(vehicle)
   netId = tonumber(netId) or 0
-  if netId <= 0 or (type(NetworkDoesNetworkIdExist) == 'function' and not NetworkDoesNetworkIdExist(netId)) then
-    return nil
-  end
 
   return {
     plate = MZFuel.GetPlate(vehicle),

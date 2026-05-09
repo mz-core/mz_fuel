@@ -24,99 +24,6 @@ local function isEnabled()
   return jerryConfig().enabled == true
 end
 
-local function getNetVehicle(netId)
-  netId = tonumber(netId) or 0
-  if netId <= 0 or type(NetworkGetEntityFromNetworkId) ~= 'function' then
-    return 0
-  end
-
-  local entity = NetworkGetEntityFromNetworkId(netId)
-  if not entity or entity == 0 then
-    return 0
-  end
-
-  if type(DoesEntityExist) == 'function' then
-    local ok, exists = pcall(DoesEntityExist, entity)
-    if not ok or exists ~= true then
-      return 0
-    end
-  end
-
-  return entity
-end
-
-local function getPlate(entity)
-  if not entity or entity == 0 or type(GetVehicleNumberPlateText) ~= 'function' then
-    return ''
-  end
-
-  local ok, plate = pcall(GetVehicleNumberPlateText, entity)
-  if not ok then
-    return ''
-  end
-
-  return normalizePlate(plate)
-end
-
-local function getVehicleFuel(entity, plate)
-  if entity and entity ~= 0 and type(Entity) == 'function' then
-    local ok, state = pcall(function()
-      return Entity(entity).state
-    end)
-
-    if ok and state then
-      local fuel = tonumber(state.fuel)
-      if fuel ~= nil then
-        return clampFuel(fuel)
-      end
-    end
-  end
-
-  if entity and entity ~= 0 and type(GetVehicleFuelLevel) == 'function' then
-    local ok, fuel = pcall(GetVehicleFuelLevel, entity)
-    if ok and tonumber(fuel) ~= nil then
-      return clampFuel(fuel)
-    end
-  end
-
-  return MZFuelPersistence.GetStoredFuelByPlate(plate)
-end
-
-local function isPlayerOutsideVehicle(source)
-  local ped = GetPlayerPed(source)
-  if not ped or ped == 0 or type(GetVehiclePedIsIn) ~= 'function' then
-    return true
-  end
-
-  local ok, vehicle = pcall(GetVehiclePedIsIn, ped, false)
-  return not ok or not vehicle or vehicle == 0
-end
-
-local function isNearVehicle(source, entity)
-  local ped = GetPlayerPed(source)
-  if not ped or ped == 0 or not entity or entity == 0 then
-    return false
-  end
-
-  local maxDistance = tonumber(jerryConfig().maxDistance) or 3.0
-  return #(GetEntityCoords(ped) - GetEntityCoords(entity)) <= maxDistance
-end
-
-local function isSupportedVehicle(entity)
-  if not entity or entity == 0 then
-    return false
-  end
-
-  if type(GetVehicleClass) == 'function' then
-    local ok, class = pcall(GetVehicleClass, entity)
-    if ok and Config.DisableOnBicycles == true and tonumber(class) == 13 then
-      return false
-    end
-  end
-
-  return true
-end
-
 local function normalizeLiters(value)
   local liters = tonumber(value)
   if not liters or liters ~= liters or liters <= 0.0 then
@@ -131,35 +38,13 @@ local function normalizeLiters(value)
   return liters + 0.0
 end
 
-local function validateVehicle(source, netId, expectedPlate)
-  local entity = getNetVehicle(netId)
-  local plate = normalizePlate(expectedPlate)
-  if entity == 0 or plate == '' then
-    return false, 'invalid_vehicle'
+local function refuelPlate(source, plate)
+  plate = normalizePlate(plate)
+  if plate ~= '' then
+    return plate
   end
 
-  if getPlate(entity) ~= plate then
-    return false, 'plate_mismatch'
-  end
-
-  if not isSupportedVehicle(entity) then
-    return false, 'vehicle_not_supported'
-  end
-
-  if jerryConfig().requireOutsideVehicle == true and not isPlayerOutsideVehicle(source) then
-    return false, 'outside_required'
-  end
-
-  if not isNearVehicle(source, entity) then
-    return false, 'too_far'
-  end
-
-  local fuel = getVehicleFuel(entity, plate)
-  if fuel and fuel >= (tonumber(Config.MaxFuel) or 100.0) then
-    return false, 'vehicle_full'
-  end
-
-  return true, entity, plate, fuel
+  return ('TEMP:%s'):format(tostring(source or 0))
 end
 
 local function getInventoryItem()
@@ -285,12 +170,6 @@ RegisterNetEvent('mz_fuel:server:authorizeJerryCan', function(payload)
     return
   end
 
-  local okVehicle, entity, plate, currentFuel = validateVehicle(src, payload.net_id or payload.netId, payload.plate)
-  if okVehicle ~= true then
-    sendAuthorizeResult(src, { ok = false, error = entity })
-    return
-  end
-
   local hasItem, itemError = hasJerryCanItem(src)
   if hasItem ~= true then
     sendAuthorizeResult(src, { ok = false, error = itemError or 'item_missing' })
@@ -299,6 +178,8 @@ RegisterNetEvent('mz_fuel:server:authorizeJerryCan', function(payload)
 
   local maxFuel = tonumber(Config.MaxFuel) or 100.0
   local configuredLiters = normalizeLiters(jerryConfig().litersPerUse) or 10.0
+  local currentFuel = clampFuel(payload.fuel_before or payload.fuelBefore or 0.0)
+  local plate = refuelPlate(src, payload.plate)
   local missing = currentFuel and math.max(0.0, maxFuel - currentFuel) or configuredLiters
   local liters = math.min(configuredLiters, missing)
   if liters <= 0.0 then
@@ -363,17 +244,9 @@ RegisterNetEvent('mz_fuel:server:finishJerryCan', function(payload)
     return
   end
 
-  local okVehicle, entity, plate, currentFuel = validateVehicle(src, session.netId, session.plate)
-  if okVehicle ~= true then
-    sendFinishResult(src, { ok = false, error = entity })
-    return
-  end
-
   local maxFuel = tonumber(Config.MaxFuel) or 100.0
   local liters = normalizeLiters(session.liters)
-  if currentFuel then
-    liters = math.min(liters or 0.0, math.max(0.0, maxFuel - currentFuel))
-  end
+  liters = math.min(liters or 0.0, maxFuel)
 
   if not liters or liters <= 0.0 then
     sendFinishResult(src, { ok = false, error = 'vehicle_full' })
@@ -391,7 +264,7 @@ RegisterNetEvent('mz_fuel:server:finishJerryCan', function(payload)
     return
   end
 
-  if MZFuelServer.AddAuthorizedFuelCredit(src, plate, liters, jerryConfig().authorizedCreditTtlMs, 'jerrycan') ~= true then
+  if MZFuelServer.AddAuthorizedFuelCredit(src, session.plate, liters, jerryConfig().authorizedCreditTtlMs, 'jerrycan') ~= true then
     sendFinishResult(src, { ok = false, error = 'credit_failed' })
     return
   end

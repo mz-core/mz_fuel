@@ -81,21 +81,7 @@ local function validateRefuelConfig()
 end
 
 local function getVehicleNetId(vehicle)
-  if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
-    return 0
-  end
-
-  local netId = NetworkGetNetworkIdFromEntity(vehicle)
-  netId = tonumber(netId) or 0
-  if netId <= 0 then
-    return 0
-  end
-
-  if type(NetworkDoesNetworkIdExist) == 'function' and not NetworkDoesNetworkIdExist(netId) then
-    return 0
-  end
-
-  return netId
+  return MZFuel.GetVehicleNetId(vehicle)
 end
 
 local function getStationId(station)
@@ -220,10 +206,6 @@ local function isValidRefuelVehicle(vehicle)
     return false, 'driver_required'
   end
 
-  if getVehicleNetId(vehicle) <= 0 then
-    return false, 'vehicle_invalid'
-  end
-
   local fuel = MZFuel.GetFuel(vehicle) or 0.0
   if fuel >= (tonumber(Config.MaxFuel) or 100.0) then
     return false, 'vehicle_full'
@@ -297,10 +279,6 @@ local function validateActiveState()
   end
 
   RefuelState.netId = getVehicleNetId(vehicle)
-  if RefuelState.netId <= 0 then
-    MZFuelRefuel.Stop('vehicle_invalid')
-    return false
-  end
 
   if isPlayerDead() then
     MZFuelRefuel.Stop('player_dead')
@@ -347,12 +325,6 @@ local function requestPayment()
 
   local vehicle = RefuelState.vehicle
   local netId = getVehicleNetId(vehicle)
-  if netId <= 0 then
-    notifyRefuelError('vehicle_invalid')
-    MZFuelRefuel.Stop('vehicle_invalid', true)
-    return
-  end
-
   RefuelState.netId = netId
   local currentFuel = MZFuel.GetFuel(vehicle) or 0.0
   local missing = (tonumber(Config.MaxFuel) or 100.0) - currentFuel
@@ -434,10 +406,6 @@ function MZFuelRefuel.Start(vehicle, station, options)
   end
 
   local netId = getVehicleNetId(vehicle)
-  if netId <= 0 then
-    notifyRefuelError('vehicle_invalid')
-    return false, 'vehicle_invalid'
-  end
 
   if station then
     local distance = distanceToStation(station)

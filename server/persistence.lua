@@ -67,6 +67,12 @@ local function saveWithCoreCondition(plate, fuel, vehicle)
   return true
 end
 
+local function debugPersistenceSkip(plate, err)
+  if Config.Debug == true then
+    print(('[mz_fuel] fuel not persisted for %s: %s'):format(plate, tostring(err)))
+  end
+end
+
 function MZFuelPersistence.NormalizePlate(plate)
   return normalizePlate(plate)
 end
@@ -110,17 +116,19 @@ function MZFuelPersistence.SaveFuelByPlate(plate, fuel, context)
 
   fuel = clampFuel(fuel)
   context = type(context) == 'table' and context or {}
-  FuelCache[plate] = fuel
+  local vehicle = type(context.vehicle) == 'table' and context.vehicle or getCoreVehicle(plate)
+  if not vehicle then
+    debugPersistenceSkip(plate, 'vehicle_not_found')
+    return false, 'vehicle_not_found'
+  end
 
-  local vehicle = type(context.vehicle) == 'table' and context.vehicle or nil
   local ok, err = saveWithCoreCondition(plate, fuel, vehicle)
   if ok == true then
+    FuelCache[plate] = fuel
     return true
   end
 
-  if Config.Debug == true then
-    print(('[mz_fuel] fuel cached only for %s: %s'):format(plate, tostring(err)))
-  end
+  debugPersistenceSkip(plate, err or 'persistence_unavailable')
 
   return false, err or 'persistence_unavailable'
 end

@@ -34,18 +34,6 @@ local function normalizeFuel(fuel)
   return MZFuelPersistence.ClampFuel(fuel)
 end
 
-local function canPlayerSavePlate(source, plate)
-  if GetResourceState('mz_core') ~= 'started' then
-    return true
-  end
-
-  local ok, allowed = pcall(function()
-    return exports['mz_core']:CanAccessVehicle(source, plate)
-  end)
-
-  return ok == true and allowed == true
-end
-
 local function plateMatchesNetworkVehicle(plate, netId)
   netId = tonumber(netId) or 0
   if netId <= 0 or type(NetworkGetEntityFromNetworkId) ~= 'function' then
@@ -96,6 +84,15 @@ end
 
 local function creditKey(source, plate)
   return ('%s:%s'):format(tostring(source or 0), normalizePlate(plate))
+end
+
+local function refuelCreditPlate(source, plate)
+  plate = normalizePlate(plate)
+  if plate ~= '' then
+    return plate
+  end
+
+  return ('TEMP:%s'):format(tostring(source or 0))
 end
 
 local function cleanupPaidFuelCredits(now)
@@ -256,147 +253,6 @@ function MZFuelServer.AddAuthorizedFuelCredit(source, plate, liters, ttlMs, reas
   return addAuthorizedFuelCredit(source, plate, liters, ttlMs, reason)
 end
 
-local function getEntityFromNetId(netId)
-  netId = tonumber(netId) or 0
-  if netId <= 0 or type(NetworkGetEntityFromNetworkId) ~= 'function' then
-    return 0
-  end
-
-  local entity = NetworkGetEntityFromNetworkId(netId)
-  if not entity or entity == 0 then
-    return 0
-  end
-
-  if type(DoesEntityExist) == 'function' then
-    local ok, exists = pcall(DoesEntityExist, entity)
-    if not ok or exists ~= true then
-      return 0
-    end
-  end
-
-  return entity
-end
-
-local function entityExists(entity)
-  if not entity or entity == 0 then
-    return false
-  end
-
-  if type(DoesEntityExist) ~= 'function' then
-    return true
-  end
-
-  local ok, exists = pcall(DoesEntityExist, entity)
-  return ok == true and exists == true
-end
-
-local function getEntityNetId(entity)
-  if not entity or entity == 0 or type(NetworkGetNetworkIdFromEntity) ~= 'function' then
-    return 0
-  end
-
-  local ok, netId = pcall(NetworkGetNetworkIdFromEntity, entity)
-  if not ok then
-    return 0
-  end
-
-  return tonumber(netId) or 0
-end
-
-local function getVehiclePlate(entity)
-  if not entity or entity == 0 or type(GetVehicleNumberPlateText) ~= 'function' then
-    return ''
-  end
-
-  local ok, vehiclePlate = pcall(GetVehicleNumberPlateText, entity)
-  if not ok then
-    return ''
-  end
-
-  return normalizePlate(vehiclePlate)
-end
-
-local function getPlayerCurrentVehicle(source)
-  local ped = GetPlayerPed(source)
-  if not ped or ped == 0 or type(GetVehiclePedIsIn) ~= 'function' then
-    return 0
-  end
-
-  local ok, vehicle = pcall(GetVehiclePedIsIn, ped, false)
-  if not ok or not vehicle or vehicle == 0 then
-    return 0
-  end
-
-  if type(DoesEntityExist) == 'function' then
-    local existsOk, exists = pcall(DoesEntityExist, vehicle)
-    if not existsOk or exists ~= true then
-      return 0
-    end
-  end
-
-  return vehicle
-end
-
-local function resolveRefuelVehicle(source, plate, netId)
-  plate = normalizePlate(plate)
-
-  local entity = getEntityFromNetId(netId)
-  local entityFromNetExists = entityExists(entity)
-  local entityFromNetPlate = entityFromNetExists and getVehiclePlate(entity) or ''
-
-  local ped = GetPlayerPed(source)
-  local pedVehicle = getPlayerCurrentVehicle(source)
-  local pedVehicleExists = entityExists(pedVehicle)
-  local pedVehiclePlate = pedVehicleExists and getVehiclePlate(pedVehicle) or ''
-  local driver = 0
-  local isDriver = false
-
-  local candidate = 0
-  local reason = 'netid_invalid'
-
-  if entity ~= 0 and getVehiclePlate(entity) == plate then
-    candidate = entity
-    reason = 'ok'
-  elseif entityFromNetExists and entityFromNetPlate ~= plate then
-    reason = 'plate_mismatch'
-  elseif pedVehicle ~= 0 and pedVehiclePlate == plate then
-    candidate = pedVehicle
-    reason = 'ok'
-  elseif pedVehicle == 0 or pedVehicleExists ~= true then
-    reason = 'ped_vehicle_invalid'
-  elseif pedVehiclePlate ~= plate then
-    reason = 'plate_mismatch'
-  end
-
-  if candidate ~= 0 and type(GetPedInVehicleSeat) == 'function' then
-    driver = GetPedInVehicleSeat(candidate, -1)
-    isDriver = driver == ped
-    if Config.Refuel and Config.Refuel.requireDriver == true and not isDriver then
-      reason = 'not_driver'
-      candidate = 0
-    end
-  end
-
-  debugPrint('server_resolve_vehicle', {
-    src = source,
-    inputNetId = netId,
-    entityFromNet = entity,
-    entityFromNetExists = entityFromNetExists,
-    ped = ped,
-    pedVeh = pedVehicle,
-    pedVehExists = pedVehicleExists,
-    pedVehNet = getEntityNetId(pedVehicle),
-    pedVehPlate = pedVehiclePlate,
-    sentPlate = plate,
-    driver = driver,
-    isDriver = isDriver,
-    result = candidate ~= 0 and 'ok' or 'fail',
-    reason = reason
-  })
-
-  return candidate, reason
-end
-
 local function normalizeLiters(value)
   local liters = tonumber(value)
   if liters == nil or liters ~= liters or liters <= 0.0 then
@@ -505,36 +361,6 @@ local function validateRefuelDistance(source, station)
   return false
 end
 
-local function validateRefuelVehicle(source, plate, netId)
-  local entity, resolveReason = resolveRefuelVehicle(source, plate, netId)
-  if entity == 0 then
-    return false, resolveReason or 'invalid_vehicle'
-  end
-
-  if type(GetVehicleClass) == 'function' then
-    local ok, class = pcall(GetVehicleClass, entity)
-    if ok and Config.DisableOnBicycles == true and tonumber(class) == 13 then
-      return false, 'invalid_vehicle'
-    end
-  end
-
-  if type(GetVehicleFuelLevel) == 'function' then
-    local ok, fuel = pcall(GetVehicleFuelLevel, entity)
-    if ok and tonumber(fuel) and tonumber(fuel) >= (tonumber(Config.MaxFuel) or 100.0) then
-      return false, 'vehicle_full'
-    end
-  end
-
-  if Config.Refuel and Config.Refuel.requireDriver == true then
-    local ped = GetPlayerPed(source)
-    if not ped or ped == 0 or type(GetPedInVehicleSeat) ~= 'function' or GetPedInVehicleSeat(entity, -1) ~= ped then
-      return false, 'not_driver'
-    end
-  end
-
-  return true, entity
-end
-
 local function canUseDebugCommand(source)
   if Config.DebugCommands ~= true then
     return false
@@ -562,20 +388,6 @@ RegisterNetEvent('mz_fuel:server:saveFuel', function(plate, fuel, context)
     return
   end
 
-  if not canPlayerSavePlate(src, plate) then
-    if Config.Debug == true then
-      print(('[mz_fuel] denied save source=%s plate=%s'):format(src, plate))
-    end
-    return
-  end
-
-  if not plateMatchesNetworkVehicle(plate, context.net_id or context.netId) then
-    if Config.Debug == true then
-      print(('[mz_fuel] denied save by plate mismatch source=%s plate=%s'):format(src, plate))
-    end
-    return
-  end
-
   if isThrottled(src, plate, context.force == true) then
     return
   end
@@ -600,7 +412,7 @@ RegisterNetEvent('mz_fuel:server:debugSetFuel', function(netId, plate, fuel)
     return
   end
 
-  if getEntityFromNetId(netId) == 0 or not plateMatchesNetworkVehicle(plate, netId) then
+  if not plateMatchesNetworkVehicle(plate, netId) then
     return
   end
 
@@ -618,6 +430,7 @@ RegisterNetEvent('mz_fuel:server:payRefuel', function(payload)
 
   local plate = normalizePlate(payload.plate)
   local liters = normalizeLiters(payload.liters)
+  local creditPlate = refuelCreditPlate(src, plate)
 
   debugPrint('server_pay_received', {
     src = src,
@@ -628,7 +441,7 @@ RegisterNetEvent('mz_fuel:server:payRefuel', function(payload)
     useMenu = Config.Refuel and Config.Refuel.useMenu
   })
 
-  if not isValidSource(src) or plate == '' or not liters then
+  if not isValidSource(src) or not liters then
     debugPrint('server_pay_denied', {
       src = src,
       reason = 'invalid_amount',
@@ -681,21 +494,6 @@ RegisterNetEvent('mz_fuel:server:payRefuel', function(payload)
     return
   end
 
-  local okVehicle, vehicleError = validateRefuelVehicle(src, plate, payload.net_id or payload.netId)
-  if okVehicle ~= true then
-    debugPrint('server_pay_denied', {
-      src = src,
-      plate = plate,
-      reason = vehicleError or 'invalid_vehicle'
-    })
-
-    TriggerClientEvent('mz_fuel:client:refuelPaid', src, {
-      ok = false,
-      error = vehicleError or 'invalid_vehicle'
-    })
-    return
-  end
-
   if Config.Refuel and Config.Refuel.useMenu == true then
     if not MZFuelMenu or type(MZFuelMenu.GetSessionLiters) ~= 'function' then
       debugPrint('server_pay_denied', {
@@ -711,7 +509,7 @@ RegisterNetEvent('mz_fuel:server:payRefuel', function(payload)
       return
     end
 
-    local sessionLiters = MZFuelMenu.GetSessionLiters(src, plate, payload.menu_session or payload.menuSession, liters, payload.net_id or payload.netId)
+    local sessionLiters = MZFuelMenu.GetSessionLiters(src, creditPlate, payload.menu_session or payload.menuSession, liters, payload.net_id or payload.netId)
     if not sessionLiters then
       debugPrint('server_pay_denied', {
         src = src,
@@ -774,10 +572,10 @@ RegisterNetEvent('mz_fuel:server:payRefuel', function(payload)
     account = Config.Refuel and Config.Refuel.paymentAccount or 'cash'
   })
 
-  addPaidFuelCredit(src, plate, liters)
+  addPaidFuelCredit(src, creditPlate, liters)
 
   if Config.Refuel and Config.Refuel.useMenu == true and MZFuelMenu and type(MZFuelMenu.CommitSessionLiters) == 'function' then
-    MZFuelMenu.CommitSessionLiters(src, plate, payload.menu_session or payload.menuSession, liters)
+    MZFuelMenu.CommitSessionLiters(src, creditPlate, payload.menu_session or payload.menuSession, liters)
   end
 
   TriggerClientEvent('mz_fuel:client:refuelPaid', src, {

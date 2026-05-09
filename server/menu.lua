@@ -8,6 +8,15 @@ local function normalizePlate(plate)
   return MZFuelPersistence.NormalizePlate(plate)
 end
 
+local function sessionPlate(source, plate)
+  plate = normalizePlate(plate)
+  if plate ~= '' then
+    return plate
+  end
+
+  return ('TEMP:%s'):format(tostring(source or 0))
+end
+
 local function clampFuel(value)
   return MZFuelPersistence.ClampFuel(value)
 end
@@ -79,98 +88,6 @@ local function normalizeAccount(account)
   return tostring(aliases[account] or account)
 end
 
-local function getNetVehicle(netId)
-  netId = tonumber(netId) or 0
-  if netId <= 0 or type(NetworkGetEntityFromNetworkId) ~= 'function' then
-    return 0
-  end
-
-  local entity = NetworkGetEntityFromNetworkId(netId)
-  if not entity or entity == 0 then
-    return 0
-  end
-
-  if type(DoesEntityExist) == 'function' then
-    local ok, exists = pcall(DoesEntityExist, entity)
-    if not ok or exists ~= true then
-      return 0
-    end
-  end
-
-  return entity
-end
-
-local function getPlayerCurrentVehicle(source)
-  local ped = GetPlayerPed(source)
-  if not ped or ped == 0 or type(GetVehiclePedIsIn) ~= 'function' then
-    return 0
-  end
-
-  local ok, vehicle = pcall(GetVehiclePedIsIn, ped, false)
-  if not ok or not vehicle or vehicle == 0 then
-    return 0
-  end
-
-  if type(DoesEntityExist) == 'function' then
-    local existsOk, exists = pcall(DoesEntityExist, vehicle)
-    if not existsOk or exists ~= true then
-      return 0
-    end
-  end
-
-  return vehicle
-end
-
-local function getPlate(entity)
-  if not entity or entity == 0 or type(GetVehicleNumberPlateText) ~= 'function' then
-    return ''
-  end
-
-  local ok, plate = pcall(GetVehicleNumberPlateText, entity)
-  if not ok then
-    return ''
-  end
-
-  return normalizePlate(plate)
-end
-
-local function resolveVehicle(source, plate, netId)
-  plate = normalizePlate(plate)
-
-  local entity = getNetVehicle(netId)
-  if entity ~= 0 and getPlate(entity) == plate then
-    return entity
-  end
-
-  local currentVehicle = getPlayerCurrentVehicle(source)
-  if currentVehicle ~= 0 and getPlate(currentVehicle) == plate then
-    return currentVehicle
-  end
-
-  return 0
-end
-
-local function getVehicleFuel(entity, plate)
-  if entity and entity ~= 0 and type(Entity) == 'function' then
-    local ok, state = pcall(function()
-      return Entity(entity).state
-    end)
-
-    if ok and state and tonumber(state.fuel) ~= nil then
-      return clampFuel(state.fuel)
-    end
-  end
-
-  if entity and entity ~= 0 and type(GetVehicleFuelLevel) == 'function' then
-    local ok, fuel = pcall(GetVehicleFuelLevel, entity)
-    if ok and tonumber(fuel) ~= nil then
-      return clampFuel(fuel)
-    end
-  end
-
-  return MZFuelPersistence.GetStoredFuelByPlate(plate)
-end
-
 local function validateStationDistance(source, station)
   if type(station) ~= 'table' then
     return false
@@ -201,35 +118,6 @@ local function validateStationDistance(source, station)
   end
 
   return false
-end
-
-local function validateVehicle(source, plate, netId)
-  plate = normalizePlate(plate)
-  local entity = resolveVehicle(source, plate, netId)
-  if entity == 0 or plate == '' then
-    return false, 'invalid_vehicle'
-  end
-
-  if type(GetVehicleClass) == 'function' then
-    local ok, class = pcall(GetVehicleClass, entity)
-    if ok and Config.DisableOnBicycles == true and tonumber(class) == 13 then
-      return false, 'invalid_vehicle'
-    end
-  end
-
-  if refuelConfig().requireDriver == true then
-    local ped = GetPlayerPed(source)
-    if not ped or ped == 0 or type(GetPedInVehicleSeat) ~= 'function' or GetPedInVehicleSeat(entity, -1) ~= ped then
-      return false, 'driver_required'
-    end
-  end
-
-  local fuel = getVehicleFuel(entity, plate)
-  if fuel and fuel >= (tonumber(Config.MaxFuel) or 100.0) then
-    return false, 'vehicle_full'
-  end
-
-  return true, entity, fuel
 end
 
 local function getPlayerBalance(source)
@@ -266,15 +154,15 @@ local function estimatePrice(liters)
 end
 
 local function makeSessionToken(source, plate)
-  return ('%s:%s:%s:%s'):format(source, plate, GetGameTimer(), math.random(100000, 999999))
+  return ('%s:%s:%s:%s'):format(source, sessionPlate(source, plate), GetGameTimer(), math.random(100000, 999999))
 end
 
 local function sessionKey(source, plate, token)
-  return ('%s:%s:%s'):format(tostring(source or 0), normalizePlate(plate), tostring(token or ''))
+  return ('%s:%s:%s'):format(tostring(source or 0), sessionPlate(source, plate), tostring(token or ''))
 end
 
 local function requestKey(source, plate, requestId)
-  return ('%s:%s:%s'):format(tostring(source or 0), normalizePlate(plate), tostring(requestId or ''))
+  return ('%s:%s:%s'):format(tostring(source or 0), sessionPlate(source, plate), tostring(requestId or ''))
 end
 
 local function cleanupSessions()
@@ -296,11 +184,11 @@ end
 
 local function clearSessionsForSourcePlate(source, plate)
   source = tonumber(source) or 0
-  plate = normalizePlate(plate)
+  plate = sessionPlate(source, plate)
 
   for key, session in pairs(Sessions) do
     if type(session) ~= 'table'
-      or (tonumber(session.source) == source and normalizePlate(session.plate) == plate) then
+      or (tonumber(session.source) == source and sessionPlate(source, session.plate) == plate) then
       Sessions[key] = nil
     end
   end
@@ -329,7 +217,7 @@ local function createSession(source, plate, netId, liters)
   local key = sessionKey(source, plate, token)
   Sessions[key] = {
     source = tonumber(source) or 0,
-    plate = normalizePlate(plate),
+    plate = sessionPlate(source, plate),
     netId = tonumber(netId) or 0,
     litersRemaining = tonumber(liters) or 0.0,
     expiresAt = GetGameTimer() + math.max(60000, tonumber(refuelConfig().paidCreditTtlMs) or 120000)
@@ -366,18 +254,7 @@ function MZFuelMenu.GetSessionLiters(source, plate, token, requestedLiters, netI
     return nil
   end
 
-  if tonumber(session.source) ~= tonumber(source) or normalizePlate(session.plate) ~= normalizePlate(plate) then
-    return nil
-  end
-
-  netId = tonumber(netId) or 0
-  if netId <= 0 or tonumber(session.netId) ~= netId then
-    return nil
-  end
-
-  local entity = resolveVehicle(source, plate, session.netId)
-  if entity == 0 or getPlate(entity) ~= normalizePlate(plate) then
-    Sessions[sessionKey(source, plate, token)] = nil
+  if tonumber(session.source) ~= tonumber(source) or sessionPlate(source, session.plate) ~= sessionPlate(source, plate) then
     return nil
   end
 
@@ -437,13 +314,7 @@ RegisterNetEvent('mz_fuel:server:requestMenuRefuel', function(payload)
     return
   end
 
-  local okVehicle, vehicleOrErr, currentFuel = validateVehicle(src, plate, netId)
-  if okVehicle ~= true then
-    TriggerClientEvent('mz_fuel:client:refuelMenuAuthorized', src, { ok = false, error = vehicleOrErr or 'invalid_vehicle' })
-    return
-  end
-
-  currentFuel = tonumber(currentFuel) or 0.0
+  local currentFuel = clampFuel(payload.fuel_before or payload.fuelBefore or 0.0)
   local missing = math.max(0.0, (tonumber(Config.MaxFuel) or 100.0) - currentFuel)
   local maxRequest = math.min(tonumber(refuelConfig().maxLitersPerRequest) or 100.0, tonumber(Config.MaxFuel) or 100.0)
   if maxRequest <= 0.0 or maxRequest ~= maxRequest or maxRequest == math.huge then
@@ -524,9 +395,6 @@ RegisterNetEvent('mz_fuel:server:cancelMenuRefuel', function(payload)
 
   local plate = normalizePlate(payload.plate)
   local requestId = tostring(payload.request_id or payload.requestId or '')
-  if plate == '' then
-    return
-  end
 
   clearSessionsForSourcePlate(src, plate)
   if requestId ~= '' then

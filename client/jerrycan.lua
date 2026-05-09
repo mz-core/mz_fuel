@@ -231,10 +231,11 @@ function MZFuelJerryCan.Start(vehicle)
   JerryCanState.vehicle = vehicle
   JerryCanState.token = nil
   JerryCanState.liters = 0.0
+  local netId = MZFuel.GetVehicleNetId(vehicle)
 
   TriggerServerEvent('mz_fuel:server:authorizeJerryCan', {
     plate = MZFuel.GetPlate(vehicle),
-    net_id = NetworkGetNetworkIdFromEntity(vehicle),
+    net_id = netId,
     fuel_before = MZFuel.GetFuel(vehicle)
   })
 
@@ -292,7 +293,7 @@ RegisterNetEvent('mz_fuel:client:jerryCanFinished', function(result)
   if vehicle ~= 0 and DoesEntityExist(vehicle) and liters > 0.0 then
     MZFuel.AddFuel(vehicle, liters)
     TriggerServerEvent('mz_fuel:server:saveFuel', MZFuel.GetPlate(vehicle), MZFuel.GetFuel(vehicle), {
-      net_id = NetworkGetNetworkIdFromEntity(vehicle),
+      net_id = MZFuel.GetVehicleNetId(vehicle),
       engine = GetVehicleEngineHealth(vehicle),
       body = GetVehicleBodyHealth(vehicle),
       force = true
