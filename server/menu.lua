@@ -26,6 +26,13 @@ local function isValidSource(source)
   return source > 0 and GetPlayerName(source) ~= nil
 end
 
+local function fuelActionAllowed(source)
+  local ok, allowed, result = pcall(function()
+    return exports['mz_core']:CanPlayerPerformAction(source, 'vehicle.drive')
+  end)
+  return ok and allowed == true and type(result) == 'table' and result.allowed == true
+end
+
 local function normalizeNumber(value, maxValue)
   local number = tonumber(value)
   if not number or number ~= number or number <= 0.0 then
@@ -283,6 +290,9 @@ end
 
 RegisterNetEvent('mz_fuel:server:requestMenuRefuel', function(payload)
   local src = source
+  if not fuelActionAllowed(src) then
+    return TriggerClientEvent('mz_fuel:client:refuelMenuAuthorized', src, { ok = false, error = 'player_state_blocked' })
+  end
   payload = type(payload) == 'table' and payload or {}
 
   if not isValidSource(src) or refuelConfig().useMenu ~= true then

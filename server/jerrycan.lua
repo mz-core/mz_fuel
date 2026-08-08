@@ -16,6 +16,13 @@ local function isValidSource(source)
   return source > 0 and GetPlayerName(source) ~= nil
 end
 
+local function jerryCanActionAllowed(source)
+  local ok, allowed, result = pcall(function()
+    return exports['mz_core']:CanPlayerPerformAction(source, 'inventory.use')
+  end)
+  return ok and allowed == true and type(result) == 'table' and result.allowed == true
+end
+
 local function jerryConfig()
   return type(Config.JerryCan) == 'table' and Config.JerryCan or {}
 end
@@ -159,6 +166,9 @@ RegisterNetEvent('mz_fuel:server:authorizeJerryCan', function(payload)
   if not isValidSource(src) then
     return
   end
+  if not jerryCanActionAllowed(src) then
+    return sendAuthorizeResult(src, { ok = false, error = 'player_state_blocked' })
+  end
 
   if not isEnabled() then
     sendAuthorizeResult(src, { ok = false, error = 'disabled' })
@@ -215,6 +225,10 @@ RegisterNetEvent('mz_fuel:server:finishJerryCan', function(payload)
 
   if not isValidSource(src) then
     return
+  end
+  if not jerryCanActionAllowed(src) then
+    ActiveJerryCan[src] = nil
+    return sendFinishResult(src, { ok = false, error = 'player_state_blocked' })
   end
 
   if not isEnabled() then

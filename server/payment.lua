@@ -15,6 +15,33 @@ local function normalizeAmount(amount)
   return math.floor(amount + 0.5)
 end
 
+local function buildLedgerMetadata(account, context)
+  context = type(context) == 'table' and context or {}
+
+  local data = {
+    payment_method = account
+  }
+
+  if context.plate ~= nil then
+    data.vehicle_plate = tostring(context.plate)
+  end
+
+  if context.liters ~= nil then
+    data.liters = tonumber(context.liters) or context.liters
+  end
+
+  return {
+    reason = 'fuel_purchase',
+    category = 'vehicle_expense',
+    source_resource = 'mz_fuel',
+    source_type = 'resource_payment',
+    counts_as_income = false,
+    counts_as_expense = true,
+    external_ref = nil,
+    data = data
+  }
+end
+
 function MZFuelPayment.Charge(source, amount, context)
   if Config.Payment and Config.Payment.enabled == false then
     return true, {
@@ -41,7 +68,7 @@ function MZFuelPayment.Charge(source, amount, context)
 
   local account = normalizeAccount(Config.Refuel and Config.Refuel.paymentAccount or 'cash')
   local ok, success, err = pcall(function()
-    return exports['mz_core']:RemoveMoney(source, account, amount)
+    return exports['mz_core']:RemoveMoney(source, account, amount, buildLedgerMetadata(account, context))
   end)
 
   if not ok then

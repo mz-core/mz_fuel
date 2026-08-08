@@ -25,6 +25,13 @@ local function isValidSource(source)
   return source > 0 and GetPlayerName(source) ~= nil
 end
 
+local function fuelActionAllowed(source)
+  local ok, allowed, result = pcall(function()
+    return exports['mz_core']:CanPlayerPerformAction(source, 'vehicle.drive')
+  end)
+  return ok and allowed == true and type(result) == 'table' and result.allowed == true
+end
+
 local function normalizeFuel(fuel)
   fuel = tonumber(fuel)
   if fuel == nil or fuel ~= fuel then
@@ -380,6 +387,7 @@ end
 
 RegisterNetEvent('mz_fuel:server:saveFuel', function(plate, fuel, context)
   local src = source
+  if not fuelActionAllowed(src) then return end
   context = type(context) == 'table' and context or {}
   plate = normalizePlate(plate)
   fuel = normalizeFuel(fuel)
@@ -426,6 +434,7 @@ end)
 
 RegisterNetEvent('mz_fuel:server:payRefuel', function(payload)
   local src = source
+  if not fuelActionAllowed(src) then return end
   payload = type(payload) == 'table' and payload or {}
 
   local plate = normalizePlate(payload.plate)
