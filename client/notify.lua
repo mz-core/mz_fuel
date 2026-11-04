@@ -8,6 +8,13 @@ local function notifyConfig()
 end
 
 local function getMessage(key, fallback)
+  if type(MZFuelLocale) == 'table' and type(MZFuelLocale.Get) == 'function' then
+    local localized = MZFuelLocale.Get(('notify.%s'):format(tostring(key or '')))
+    if type(localized) == 'string' and localized ~= '' then
+      return localized
+    end
+  end
+
   local messages = type(notifyConfig().messages) == 'table' and notifyConfig().messages or {}
   return tostring(messages[key] or fallback or key or '')
 end
@@ -86,9 +93,14 @@ function MZFuelNotify.Notify(message, notifyType)
 
   local resource = tostring(cfg.resource or 'mz_notify')
   if resource ~= '' and GetResourceState(resource) == 'started' then
+    local title = 'Combustivel'
+    if type(MZFuelLocale) == 'table' and type(MZFuelLocale.Get) == 'function' then
+      title = MZFuelLocale.Get('notify.title') or title
+    end
+
     local ok = pcall(function()
       exports[resource]:Notify({
-        title = 'Combustivel',
+        title = title,
         message = message,
         type = notifyType or 'inform'
       })

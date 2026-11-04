@@ -237,3 +237,133 @@ RegisterCommand('mfuel_refill', function()
 
   requestDebugSetFuel(vehicle, Config.MaxFuel or 100.0)
 end, false)
+
+local function printDiagnosticsTable(title, data)
+  print(('[mz_fuel][diag] %s'):format(tostring(title)))
+  for key, value in pairs(data or {}) do
+    print(('  %s=%s'):format(tostring(key), tostring(value)))
+  end
+end
+
+RegisterCommand('mfuel_diag', function()
+  if Config.Debug ~= true then
+    return
+  end
+
+  local ped = PlayerPedId()
+  local vehicle = GetVehiclePedIsIn(ped, false)
+  if vehicle == 0 then
+    vehicle = MZFuelNozzle and MZFuelNozzle.GetVehicle and MZFuelNozzle.GetVehicle() or 0
+  end
+
+  printDiagnosticsTable('interactions', {
+    mode = MZFuelInteractions and MZFuelInteractions.GetActiveMode and MZFuelInteractions.GetActiveMode() or 'unknown',
+    target_api = MZFuelInteractions and MZFuelInteractions.GetTargetApiStatus and MZFuelInteractions.GetTargetApiStatus() or 'unknown',
+    locale = MZFuelLocale and MZFuelLocale.GetCode and MZFuelLocale.GetCode() or 'unknown'
+  })
+
+  if MZFuelPumps and MZFuelPumps.GetDiagnostics then
+    printDiagnosticsTable('pumps', MZFuelPumps.GetDiagnostics())
+  end
+
+  if MZFuelNozzle and MZFuelNozzle.GetDiagnostics then
+    printDiagnosticsTable('nozzle', MZFuelNozzle.GetDiagnostics())
+  end
+
+  if MZFuelRefuel and MZFuelRefuel.GetDiagnostics then
+    printDiagnosticsTable('refuel', MZFuelRefuel.GetDiagnostics())
+  end
+
+  if vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
+    local tank = MZFuelNozzle and MZFuelNozzle.GetTankWorldPosition and MZFuelNozzle.GetTankWorldPosition(vehicle) or nil
+    printDiagnosticsTable('vehicle', {
+      entity = vehicle,
+      plate = MZFuel.GetPlate(vehicle),
+      fuel = MZFuel.GetFuel(vehicle) or 0.0,
+      engine_running = GetIsVehicleEngineRunning(vehicle) == true or GetIsVehicleEngineRunning(vehicle) == 1,
+      class = GetVehicleClass(vehicle),
+      tank_source = tank and tank.source or 'none',
+      tank_bone = tank and (tank.boneName or tostring(tank.bone)) or 'none',
+      tank_confidence = tank and tank.confident == true or false,
+      tank_x = tank and tank.coords.x or 0.0,
+      tank_y = tank and tank.coords.y or 0.0,
+      tank_z = tank and tank.coords.z or 0.0
+    })
+  end
+end, false)
+
+RegisterCommand('mfuel_calibrate', function(_, args)
+  if Config.Debug ~= true then
+    return
+  end
+
+  local mode = tostring(args and args[1] or ''):lower()
+  if mode == 'marker' then
+    Config.DebugTankMarker = not Config.DebugTankMarker
+    print(('[mz_fuel][calibrate] tank_marker=%s'):format(tostring(Config.DebugTankMarker)))
+    return
+  end
+
+  local function number(index)
+    return tonumber(args and args[index])
+  end
+
+  if mode == 'hose' then
+    local hx, hy, hz = number(2), number(3), number(4)
+    if not hx or not hy or not hz then
+      local current = Config.Refuel.hoseNozzleOffset or vec3(0.0, -0.033, -0.195)
+      print(('[mz_fuel][calibrate] hose_offset atual=%.3f,%.3f,%.3f'):format(current.x, current.y, current.z))
+      print('[mz_fuel] uso: /mfuel_calibrate hose x y z')
+      return
+    end
+
+    local ok, rope = MZFuelNozzle.SetHoseNozzleOffset(vec3(hx, hy, hz))
+    print(('[mz_fuel][calibrate] hose_offset=%.3f,%.3f,%.3f rope=%s ok=%s'):format(hx, hy, hz, tostring(rope), tostring(ok)))
+    return
+  end
+
+  local x, y, z = number(2), number(3), number(4)
+  local rx, ry, rz = number(5), number(6), number(7)
+
+  if mode == 'hand' and x and y and z and rx and ry and rz then
+    Config.Refuel.nozzleHandOffset = vec3(x, y, z)
+    Config.Refuel.nozzleHandRotation = vec3(rx, ry, rz)
+    print(('[mz_fuel][calibrate] hand_offset=%.2f,%.2f,%.2f hand_rotation=%.2f,%.2f,%.2f'):format(x, y, z, rx, ry, rz))
+  elseif mode == 'tank' and x and y and z and rx and ry and rz then
+    Config.Refuel.nozzleVehicleOffset = vec3(x, y, z)
+    Config.Refuel.nozzleVehicleRotation = vec3(rx, ry, rz)
+    print(('[mz_fuel][calibrate] vehicle_offset=%.2f,%.2f,%.2f vehicle_rotation=%.2f,%.2f,%.2f'):format(x, y, z, rx, ry, rz))
+  elseif mode == 'model' and x and y and z and rx and ry and rz then
+    local ped = PlayerPedId()
+    local vehicle = GetVehiclePedIsIn(ped, false)
+    if vehicle == 0 and MZFuelNozzle then
+      vehicle = MZFuelNozzle.GetVehicle() or 0
+      if vehicle == 0 and MZFuelNozzle.GetNearbyVehicleForDock then
+        vehicle = MZFuelNozzle.GetNearbyVehicleForDock() or 0
+      end
+    end
+
+    if vehicle == 0 or not DoesEntityExist(vehicle) then
+      print('[mz_fuel] /mfuel_calibrate model: nenhum veiculo proximo')
+      return
+    end
+
+    local ok, modelHash, bone = MZFuelNozzle.SetModelTankOffset(vehicle, vec3(x, y, z), vec3(rx, ry, rz))
+    local display = GetDisplayNameFromVehicleModel(GetEntityModel(vehicle))
+    print(('[mz_fuel][calibrate] model_offset display=%s hash=%s bone=%s offset=%.2f,%.2f,%.2f rotation=%.2f,%.2f,%.2f ok=%s'):format(
+      tostring(display), tostring(modelHash), tostring(bone), x, y, z, rx, ry, rz, tostring(ok)
+    ))
+  else
+    print('[mz_fuel] uso: /mfuel_calibrate marker')
+    print('[mz_fuel] uso: /mfuel_calibrate hand x y z rx ry rz')
+    print('[mz_fuel] uso: /mfuel_calibrate tank x y z rx ry rz')
+    print('[mz_fuel] uso: /mfuel_calibrate model x y z rx ry rz')
+    print('[mz_fuel] uso: /mfuel_calibrate hose x y z')
+    return
+  end
+
+  if MZFuelNozzle and MZFuelNozzle.Reattach then
+    local ok = MZFuelNozzle.Reattach()
+    print(('[mz_fuel][calibrate] reattach=%s'):format(tostring(ok)))
+  end
+end, false)

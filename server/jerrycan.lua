@@ -68,12 +68,12 @@ local function hasJerryCanItem(source)
     return inventoryFallbackAllowed(), inventoryFallbackAllowed() and nil or 'invalid_item'
   end
 
-  if GetResourceState('mz_core') ~= 'started' then
+  if GetResourceState('mz_inventory') ~= 'started' then
     return inventoryFallbackAllowed(), inventoryFallbackAllowed() and nil or 'inventory_unavailable'
   end
 
   local ok, hasItem = pcall(function()
-    return exports['mz_core']:HasPlayerItem(source, item, 1)
+    return exports['mz_inventory']:HasPlayerItem(source, item, 1)
   end)
 
   if not ok then
@@ -93,12 +93,12 @@ local function consumeJerryCanItem(source)
     return inventoryFallbackAllowed(), inventoryFallbackAllowed() and nil or 'invalid_item'
   end
 
-  if GetResourceState('mz_core') ~= 'started' then
+  if GetResourceState('mz_inventory') ~= 'started' then
     return inventoryFallbackAllowed(), inventoryFallbackAllowed() and nil or 'inventory_unavailable'
   end
 
   local ok, success, err = pcall(function()
-    return exports['mz_core']:RemovePlayerItem(source, item, 1)
+    return exports['mz_inventory']:RemovePlayerItem(source, item, 1)
   end)
 
   if not ok then
@@ -132,7 +132,7 @@ local function sendFinishResult(source, payload)
 end
 
 local function registerInventoryUseHandler()
-  if not isEnabled() or GetResourceState('mz_core') ~= 'started' then
+  if not isEnabled() or GetResourceState('mz_inventory') ~= 'started' then
     return
   end
 
@@ -142,7 +142,7 @@ local function registerInventoryUseHandler()
   end
 
   pcall(function()
-    exports['mz_core']:RegisterItemUseHandler(item, function(payload)
+    exports['mz_inventory']:RegisterItemUseHandler(item, function(payload)
       local src = tonumber(payload and payload.source)
       if not src then
         return { ok = false, error = 'invalid_source' }

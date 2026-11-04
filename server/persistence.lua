@@ -19,17 +19,17 @@ local function normalizePlate(plate)
   return tostring(plate or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
 end
 
-local function coreStarted()
-  return GetResourceState('mz_core') == 'started'
+local function vehicleDomainStarted()
+  return GetResourceState('mz_vehicles') == 'started'
 end
 
-local function getCoreVehicle(plate)
-  if not coreStarted() then
+local function getVehicle(plate)
+  if not vehicleDomainStarted() then
     return nil
   end
 
   local ok, success, result = pcall(function()
-    return exports['mz_core']:GetVehicleByPlate(plate)
+    return exports['mz_vehicles']:GetVehicleByPlate(plate)
   end)
 
   if ok and success == true and type(result) == 'table' then
@@ -39,12 +39,12 @@ local function getCoreVehicle(plate)
   return nil
 end
 
-local function saveWithCoreCondition(plate, fuel, vehicle)
-  if not coreStarted() then
-    return false, 'mz_core_unavailable'
+local function saveCondition(plate, fuel, vehicle)
+  if not vehicleDomainStarted() then
+    return false, 'mz_vehicles_unavailable'
   end
 
-  vehicle = type(vehicle) == 'table' and vehicle or getCoreVehicle(plate)
+  vehicle = type(vehicle) == 'table' and vehicle or getVehicle(plate)
   if not vehicle then
     return false, 'vehicle_not_found'
   end
@@ -53,7 +53,7 @@ local function saveWithCoreCondition(plate, fuel, vehicle)
   local body = tonumber(vehicle.body) or 1000.0
 
   local ok, success, result = pcall(function()
-    return exports['mz_core']:SetVehicleCondition(plate, fuel, engine, body)
+    return exports['mz_vehicles']:SetVehicleCondition(plate, fuel, engine, body)
   end)
 
   if not ok then
@@ -100,12 +100,21 @@ function MZFuelPersistence.GetStoredFuelByPlate(plate)
     return FuelCache[plate]
   end
 
-  local vehicle = getCoreVehicle(plate)
+  local vehicle = getVehicle(plate)
   if vehicle and tonumber(vehicle.fuel) ~= nil then
     return clampFuel(vehicle.fuel)
   end
 
   return nil
+end
+
+function MZFuelPersistence.IsRegisteredPlate(plate)
+  plate = normalizePlate(plate)
+  if plate == '' then
+    return false
+  end
+
+  return getVehicle(plate) ~= nil
 end
 
 function MZFuelPersistence.SaveFuelByPlate(plate, fuel, context)
@@ -116,13 +125,13 @@ function MZFuelPersistence.SaveFuelByPlate(plate, fuel, context)
 
   fuel = clampFuel(fuel)
   context = type(context) == 'table' and context or {}
-  local vehicle = type(context.vehicle) == 'table' and context.vehicle or getCoreVehicle(plate)
+  local vehicle = type(context.vehicle) == 'table' and context.vehicle or getVehicle(plate)
   if not vehicle then
     debugPersistenceSkip(plate, 'vehicle_not_found')
     return false, 'vehicle_not_found'
   end
 
-  local ok, err = saveWithCoreCondition(plate, fuel, vehicle)
+  local ok, err = saveCondition(plate, fuel, vehicle)
   if ok == true then
     FuelCache[plate] = fuel
     return true

@@ -69,7 +69,25 @@ local function plateMatchesNetworkVehicle(plate, netId)
   end
 
   local normalizedVehiclePlate = normalizePlate(vehiclePlate)
-  return normalizedVehiclePlate == '' or normalizedVehiclePlate == plate
+  if normalizedVehiclePlate == '' or normalizedVehiclePlate == plate then
+    return true
+  end
+
+  -- mz_vehicles pode usar uma placa lógica em state bag. Nesse caso a placa
+  -- nativa pode ser apenas a placa visual do modelo.
+  local stateOk, statePlate = pcall(function()
+    local state = Entity(entity).state
+    return state and state.mz_plate or nil
+  end)
+
+  if stateOk and statePlate then
+    local normalizedStatePlate = normalizePlate(statePlate)
+    if normalizedStatePlate ~= '' and normalizedStatePlate == plate then
+      return true
+    end
+  end
+
+  return false
 end
 
 local function isThrottled(source, plate, force)
@@ -89,14 +107,23 @@ local function isThrottled(source, plate, force)
   return false
 end
 
-local function creditKey(source, plate)
-  return ('%s:%s'):format(tostring(source or 0), normalizePlate(plate))
+local function creditKey(source, key)
+  return ('%s:%s'):format(tostring(source or 0), tostring(key or ''))
 end
 
-local function refuelCreditPlate(source, plate)
-  plate = normalizePlate(plate)
+local function refuelCreditKey(source, payload, vehicleKey)
+  local sessionKey = tostring(payload.session_key or payload.sessionKey or '')
+  if sessionKey ~= '' then
+    return sessionKey
+  end
+
+  local plate = normalizePlate(payload.plate)
   if plate ~= '' then
     return plate
+  end
+
+  if vehicleKey and vehicleKey ~= '' then
+    return vehicleKey
   end
 
   return ('TEMP:%s'):format(tostring(source or 0))
@@ -114,17 +141,17 @@ local function cleanupPaidFuelCredits(now)
   end
 end
 
-local function addPaidFuelCredit(source, plate, liters)
-  plate = normalizePlate(plate)
+local function addPaidFuelCredit(source, creditKeyValue, liters)
+  creditKeyValue = tostring(creditKeyValue or '')
   liters = tonumber(liters) or 0.0
-  if plate == '' or liters <= 0.0 then
+  if creditKeyValue == '' or liters <= 0.0 then
     return
   end
 
   local now = GetGameTimer()
   cleanupPaidFuelCredits(now)
 
-  local key = creditKey(source, plate)
+  local key = creditKey(source, creditKeyValue)
   local current = PaidFuelCredits[key]
   local available = type(current) == 'table' and tonumber(current.liters) or tonumber(current)
   local ttl = tonumber(Config.Refuel and Config.Refuel.paidCreditTtlMs) or 120000
@@ -135,7 +162,7 @@ local function addPaidFuelCredit(source, plate, liters)
   }
 end
 
-local function consumePaidFuelCredit(source, plate, increase)
+local function consumePaidFuelCredit(source, creditKeyValue, increase)
   increase = tonumber(increase) or 0.0
   if increase <= 0.0 then
     return true
@@ -143,7 +170,7 @@ local function consumePaidFuelCredit(source, plate, increase)
 
   cleanupPaidFuelCredits(GetGameTimer())
 
-  local key = creditKey(source, plate)
+  local key = creditKey(source, creditKeyValue)
   local credit = PaidFuelCredits[key]
   local available = type(credit) == 'table' and tonumber(credit.liters) or tonumber(credit) or 0.0
   local tolerance = 0.25
@@ -226,10 +253,26 @@ local function consumeAuthorizedFuelCredit(source, plate, increase)
   return true
 end
 
-local function canPersistFuelChange(source, plate, nextFuel)
+local function canPersistFuelChange(source, plate, nextFuel, context)
   local currentFuel = MZFuelPersistence.GetStoredFuelByPlate(plate)
+  context = type(context) == 'table' and context or {}
+  local creditKeyValue = tostring(context.session_key or context.sessionKey or '')
+  if creditKeyValue == '' then
+    creditKeyValue = plate
+  end
+
+  -- Sem baseline persistido nao e possivel provar que o aumento veio de
+  -- abastecimento. Exigimos credito pago/autorizado em vez de liberar fuel
+  -- gratuito para uma placa sem historico.
   if currentFuel == nil then
-    return true
+    if (tonumber(nextFuel) or 0.0) <= (tonumber(Config.MinFuel) or 0.0) + 0.25 then
+      return true
+    end
+
+    return consumePaidFuelCredit(source, creditKeyValue, tonumber(nextFuel) or 0.0)
+      or (creditKeyValue ~= plate and consumePaidFuelCredit(source, plate, tonumber(nextFuel) or 0.0))
+      or consumeAuthorizedFuelCredit(source, creditKeyValue, tonumber(nextFuel) or 0.0)
+      or (creditKeyValue ~= plate and consumeAuthorizedFuelCredit(source, plate, tonumber(nextFuel) or 0.0))
   end
 
   local increase = (tonumber(nextFuel) or 0.0) - currentFuel
@@ -237,7 +280,10 @@ local function canPersistFuelChange(source, plate, nextFuel)
     return true
   end
 
-  return consumePaidFuelCredit(source, plate, increase) or consumeAuthorizedFuelCredit(source, plate, increase)
+  return consumePaidFuelCredit(source, creditKeyValue, increase)
+    or (creditKeyValue ~= plate and consumePaidFuelCredit(source, plate, increase))
+    or consumeAuthorizedFuelCredit(source, creditKeyValue, increase)
+    or (creditKeyValue ~= plate and consumeAuthorizedFuelCredit(source, plate, increase))
 end
 
 CreateThread(function()
@@ -334,38 +380,67 @@ local function isRefuelPaymentRateLimited(source)
   return false
 end
 
-local function validateRefuelDistance(source, station)
-  if type(station) ~= 'table' then
-    return false
-  end
-
-  local x = tonumber(station.x)
-  local y = tonumber(station.y)
-  local z = tonumber(station.z)
-  if not x or not y or not z then
-    return false
-  end
-
+local function validateRefuelDistance(source, station, pump, stationId)
   local ped = GetPlayerPed(source)
   if not ped or ped == 0 then
     return false
   end
 
-  local coords = GetEntityCoords(ped)
-  local stationCoords = vector3(x, y, z)
-  local maxDistance = tonumber(Config.Refuel and Config.Refuel.maxDistance) or 6.0
-  if #(coords - stationCoords) > maxDistance then
-    return false
-  end
+  local hasPump = type(pump) == 'table'
+  local stationCoords = nil
 
-  local locations = Config.Stations and Config.Stations.locations or {}
-  for _, configuredStation in ipairs(locations) do
-    if #(stationCoords - configuredStation) <= 1.5 then
-      return true
+  if type(station) == 'table' then
+    local x = tonumber(station.x)
+    local y = tonumber(station.y)
+    local z = tonumber(station.z)
+    if x and y and z then
+      stationCoords = vector3(x, y, z)
     end
   end
 
-  return false
+  if not stationCoords and not hasPump then
+    return false
+  end
+
+  local coords = GetEntityCoords(ped)
+  if stationCoords then
+    local maxDistance = tonumber(Config.Refuel and Config.Refuel.maxDistance) or 6.0
+    if hasPump then
+      maxDistance = math.max(
+        maxDistance,
+        (tonumber(Config.Refuel and Config.Refuel.pumpStationRadius) or 40.0)
+          + (tonumber(Config.Refuel and Config.Refuel.maxPumpDistance) or 10.0)
+      )
+    end
+
+    if #(coords - stationCoords) > maxDistance then
+      return false
+    end
+
+    local matched = false
+    for _, configuredStation in ipairs(Config.Stations and Config.Stations.locations or {}) do
+      if #(stationCoords - configuredStation) <= 1.5 then
+        matched = true
+        break
+      end
+    end
+
+    if not matched and not hasPump then
+      return false
+    end
+  end
+
+  if hasPump then
+    if not MZFuelPumpsServer or not MZFuelPumpsServer.ValidatePump then
+      return false
+    end
+
+    if MZFuelPumpsServer.ValidatePump(source, pump, stationId, station) ~= true then
+      return false
+    end
+  end
+
+  return true
 end
 
 local function canUseDebugCommand(source)
@@ -396,11 +471,17 @@ RegisterNetEvent('mz_fuel:server:saveFuel', function(plate, fuel, context)
     return
   end
 
+  -- Placa e apenas metadado. Veiculos NPC/alugados/importados nao precisam
+  -- existir em mz_vehicles; nesse caso o client atualiza somente a entidade.
+  if not MZFuelPersistence.IsRegisteredPlate(plate) then
+    return
+  end
+
   if isThrottled(src, plate, context.force == true) then
     return
   end
 
-  if not canPersistFuelChange(src, plate, fuel) then
+  if not canPersistFuelChange(src, plate, fuel, context) then
     if Config.Debug == true then
       print(('[mz_fuel] denied unpaid fuel increase source=%s plate=%s fuel=%.2f'):format(src, plate, fuel))
     end
@@ -438,15 +519,30 @@ RegisterNetEvent('mz_fuel:server:payRefuel', function(payload)
   payload = type(payload) == 'table' and payload or {}
 
   local plate = normalizePlate(payload.plate)
+  local netId = tonumber(payload.net_id or payload.netId) or 0
+  local vehicleKey = tostring(payload.vehicle_key or payload.vehicleKey or '')
+  if vehicleKey == '' then
+    vehicleKey = ('source:%s'):format(src)
+  end
+
+  local sessionKey = tostring(payload.session_key or payload.sessionKey or '')
+  if sessionKey == '' then
+    sessionKey = vehicleKey
+  end
+
   local liters = normalizeLiters(payload.liters)
-  local creditPlate = refuelCreditPlate(src, plate)
+  local creditKeyValue = refuelCreditKey(src, payload, vehicleKey)
 
   debugPrint('server_pay_received', {
     src = src,
     plate = plate,
-    netId = payload.net_id or payload.netId,
+    netId = netId,
+    vehicleKey = vehicleKey,
+    sessionKey = sessionKey,
     liters = payload.liters,
     stationId = payload.station_id or payload.stationId,
+    physical = payload.physical == true,
+    pump = payload.pump_key or payload.pumpKey,
     useMenu = Config.Refuel and Config.Refuel.useMenu
   })
 
@@ -488,7 +584,61 @@ RegisterNetEvent('mz_fuel:server:payRefuel', function(payload)
     return
   end
 
-  if validateRefuelDistance(src, payload.station) ~= true then
+  local physical = payload.physical == true
+  if physical and (not Config.Refuel or Config.Refuel.physical ~= true) then
+    TriggerClientEvent('mz_fuel:client:refuelPaid', src, {
+      ok = false,
+      error = 'physical_disabled'
+    })
+    return
+  end
+
+  if physical and netId > 0 and type(NetworkGetEntityFromNetworkId) == 'function' then
+    local entityOk, entity = pcall(NetworkGetEntityFromNetworkId, netId)
+    if not entityOk or not entity or entity == 0 then
+      TriggerClientEvent('mz_fuel:client:refuelPaid', src, {
+        ok = false,
+        error = 'vehicle_entity_invalid'
+      })
+      return
+    end
+
+    if type(GetEntityType) == 'function' then
+      local typeOk, entityType = pcall(GetEntityType, entity)
+      if typeOk and tonumber(entityType) ~= nil and tonumber(entityType) ~= 2 then
+        TriggerClientEvent('mz_fuel:client:refuelPaid', src, {
+          ok = false,
+          error = 'vehicle_entity_invalid'
+        })
+        return
+      end
+    end
+  end
+
+  if physical and (not MZFuelPumpsServer or MZFuelPumpsServer.IsLockedBy(src, payload.pump_key or payload.pumpKey) ~= true) then
+    debugPrint('server_pay_denied', {
+      src = src,
+      plate = plate,
+      reason = 'pump_not_claimed',
+      pump = payload.pump_key or payload.pumpKey
+    })
+
+    TriggerClientEvent('mz_fuel:client:refuelPaid', src, {
+      ok = false,
+      error = 'pump_not_claimed'
+    })
+    return
+  end
+
+  if physical and type(payload.pump) ~= 'table' then
+    TriggerClientEvent('mz_fuel:client:refuelPaid', src, {
+      ok = false,
+      error = 'pump_distance_invalid'
+    })
+    return
+  end
+
+  if validateRefuelDistance(src, payload.station, physical and (payload.pump or payload.pumpCoords) or nil, payload.station_id or payload.stationId) ~= true then
     debugPrint('server_pay_denied', {
       src = src,
       plate = plate,
@@ -518,7 +668,7 @@ RegisterNetEvent('mz_fuel:server:payRefuel', function(payload)
       return
     end
 
-    local sessionLiters = MZFuelMenu.GetSessionLiters(src, creditPlate, payload.menu_session or payload.menuSession, liters, payload.net_id or payload.netId)
+    local sessionLiters = MZFuelMenu.GetSessionLiters(src, vehicleKey, payload.menu_session or payload.menuSession, liters, netId)
     if not sessionLiters then
       debugPrint('server_pay_denied', {
         src = src,
@@ -581,10 +731,10 @@ RegisterNetEvent('mz_fuel:server:payRefuel', function(payload)
     account = Config.Refuel and Config.Refuel.paymentAccount or 'cash'
   })
 
-  addPaidFuelCredit(src, creditPlate, liters)
+  addPaidFuelCredit(src, creditKeyValue, liters)
 
   if Config.Refuel and Config.Refuel.useMenu == true and MZFuelMenu and type(MZFuelMenu.CommitSessionLiters) == 'function' then
-    MZFuelMenu.CommitSessionLiters(src, creditPlate, payload.menu_session or payload.menuSession, liters)
+    MZFuelMenu.CommitSessionLiters(src, vehicleKey, payload.menu_session or payload.menuSession, liters)
   end
 
   TriggerClientEvent('mz_fuel:client:refuelPaid', src, {

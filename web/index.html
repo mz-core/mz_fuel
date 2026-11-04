@@ -7,37 +7,72 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <main id="app" class="hidden">
-      <section class="panel">
-        <header>
-          <span>Posto</span>
-          <button id="close" type="button">Cancelar</button>
+    <main id="app" class="hidden" aria-hidden="true">
+      <section class="panel" role="dialog" aria-modal="true" aria-labelledby="title">
+        <header class="head">
+          <div>
+            <h1 id="title">Abastecimento</h1>
+            <p id="subtitle"></p>
+          </div>
+          <button id="close" class="ghost" type="button">Cancelar</button>
         </header>
 
-        <div class="fuel-row">
-          <span>Combustivel atual</span>
-          <strong id="fuel">0%</strong>
+        <div class="stats">
+          <div class="stat">
+            <span id="currentFuelLabel">Combustivel atual</span>
+            <strong id="fuel">0.0</strong>
+          </div>
+          <div class="stat">
+            <span id="priceLabel">Preco por litro</span>
+            <strong id="price">0</strong>
+          </div>
+          <div class="stat">
+            <span id="capacityLabel">Capacidade</span>
+            <strong id="capacity">0.0</strong>
+          </div>
         </div>
+
+        <p id="physicalHint" class="hint hidden"></p>
 
         <button id="fill" class="primary" type="button">Completar tanque</button>
 
-        <label>
-          Valor em dinheiro
+        <div class="field" id="moneyField">
+          <label id="moneyLabel" for="money">Abastecer por valor</label>
           <div class="input-row">
-            <input id="money" type="number" min="1" step="1" placeholder="Ex: 250" />
+            <input id="money" type="number" min="1" step="1" inputmode="decimal" />
             <button id="moneyBtn" type="button">Abastecer</button>
           </div>
-        </label>
+        </div>
 
-        <label>
-          Litros
+        <div class="field" id="litersField">
+          <label id="litersLabel" for="liters">Abastecer por litros</label>
           <div class="input-row">
-            <input id="liters" type="number" min="1" step="0.1" placeholder="Ex: 20" />
+            <input id="liters" type="number" min="0.1" step="0.1" inputmode="decimal" />
             <button id="litersBtn" type="button">Abastecer</button>
           </div>
-        </label>
+        </div>
+
+        <div class="estimate">
+          <span id="estimateLabel">Total estimado</span>
+          <strong id="estimate">0</strong>
+        </div>
+
+        <footer class="payment">
+          <span id="paymentLabel">Pagamento via mz_economy</span>
+        </footer>
       </section>
     </main>
+
+    <section id="progress" class="progress hidden" aria-hidden="true">
+      <div class="progress-head">
+        <span id="progressLabel">Abastecendo</span>
+        <strong id="progressPercent">0%</strong>
+      </div>
+      <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="progressFill"></div>
+      </div>
+      <span id="progressDetail"></span>
+    </section>
 
     <script src="script.js"></script>
   </body>

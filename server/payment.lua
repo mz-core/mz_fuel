@@ -15,7 +15,16 @@ local function normalizeAmount(amount)
   return math.floor(amount + 0.5)
 end
 
-local function buildLedgerMetadata(account, context)
+local function newPaymentOperationKey(source)
+  return ('fuel_%d_%d_%06d_%d'):format(
+    os.time(),
+    type(GetGameTimer) == 'function' and GetGameTimer() or 0,
+    math.random(0, 999999),
+    math.max(0, math.floor(tonumber(source) or 0))
+  )
+end
+
+local function buildLedgerMetadata(account, context, operationKey)
   context = type(context) == 'table' and context or {}
 
   local data = {
@@ -37,7 +46,8 @@ local function buildLedgerMetadata(account, context)
     source_type = 'resource_payment',
     counts_as_income = false,
     counts_as_expense = true,
-    external_ref = nil,
+    idempotency_key = operationKey,
+    external_ref = operationKey,
     data = data
   }
 end
@@ -55,20 +65,16 @@ function MZFuelPayment.Charge(source, amount, context)
     return false, 'invalid_amount'
   end
 
-  if GetResourceState('mz_core') ~= 'started' then
-    if Config.Payment and Config.Payment.allowFallbackWithoutMzCore == true then
-      return true, {
-        paid = 0,
-        account = 'fallback'
-      }
-    end
-
+  if GetResourceState('mz_economy') ~= 'started' then
     return false, 'payment_unavailable'
   end
 
   local account = normalizeAccount(Config.Refuel and Config.Refuel.paymentAccount or 'cash')
+  local operationKey = newPaymentOperationKey(source)
   local ok, success, err = pcall(function()
-    return exports['mz_core']:RemoveMoney(source, account, amount, buildLedgerMetadata(account, context))
+    return exports['mz_economy']:RemoveMoney(
+      source, account, amount, buildLedgerMetadata(account, context, operationKey)
+    )
   end)
 
   if not ok then

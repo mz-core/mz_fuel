@@ -19,13 +19,13 @@ Versão: `1.0.0-dev/stable`
 - `mz_vehicles`
 - `mz_garagem`
 
-Observação: o `fxmanifest.lua` declara apenas `mz_core` como dependência dura porque `mz_fuel` deve iniciar antes da garagem para que a garagem consiga usar os exports de fuel. `mz_vehicles` e `mz_garagem` continuam obrigatórios no fluxo completo do ecossistema.
+Observação: o `fxmanifest.lua` declara `mz_core`, `mz_vehicles` e `mz_inventory` como dependências duras. `mz_garagem` depende de `mz_fuel`, portanto inicia depois dele.
 
 ## Dependências opcionais
 
-- `mz_interact`: usado como camada de interação quando iniciado e quando `Config.Interaction` permite.
+- `mz_interact`: usado como fallback de interação quando `mz_target` não estiver disponível.
 - `mz_notify`: usado para notificações/progresso quando iniciado.
-- `mz_target`: atualmente não possui API pública compatível para registrar pontos externos. O adapter detecta isso e cai para `mz_interact` ou marker.
+- `mz_target`: usado via `AddTargetModel`/`AddGlobalVehicle` nas bombas e no veículo. Quando não está iniciado, o `mz_fuel` cai para `mz_interact` ou para a tecla E no marker.
 
 ## Ordem recomendada no server.cfg
 
@@ -69,13 +69,13 @@ add_ace group.mz_owner mz_fuel.debug allow
 Controla abastecimento em postos:
 
 - `pricePerLiter`: preço por litro.
-- `paymentAccount`: conta usada no `mz_core`, normalmente `cash` ou `bank`.
+- `paymentAccount`: conta usada no `mz_economy`, normalmente `cash` ou `bank`.
 - `tickMs`: intervalo do abastecimento progressivo.
 - `litersPerTick`: litros por tick.
 - `maxDistance`: distância máxima do posto.
 - `paidCreditTtlMs`: tempo máximo do crédito pago.
-- `requireDriver`: exige motorista no banco.
-- `allowInsideVehicle`: permite iniciar dentro do veículo.
+- `requireDriver`: exige motorista no banco (padrão `false` no fluxo físico).
+- `allowInsideVehicle`: permite iniciar dentro do veículo (padrão `false` no fluxo físico).
 - `saveOnComplete`: salva ao terminar/cancelar quando necessário.
 - `useMenu`: usa a UI simples de abastecimento.
 - `menuMode`: modo do menu, atualmente `simple`.
@@ -84,13 +84,48 @@ Controla abastecimento em postos:
 - `allowMoneyAmount`: permite abastecer por valor.
 - `allowLiterAmount`: permite abastecer por litros.
 
+### Fluxo físico (`Config.Refuel.physical`)
+
+Com `physical = true` (padrão), o abastecimento usa as bombas reais do mapa:
+
+1. O jogador sai do veículo e desliga o motor.
+2. Mira na bomba com `mz_target` e escolhe **Pegar bico de combustível**.
+3. O prop `prop_cs_fuel_nozle` é anexado à mão; a mangueira usa rope natives quando disponíveis.
+4. Ao se aproximar do tanque, o target do veículo oferece **Encaixar bico no tanque**.
+5. O menu de abastecimento abre; o bico permanece preso ao veículo.
+6. O pagamento é feito por tick no servidor; o combustível só sobe após confirmação.
+7. O jogador retira o bico e o devolve à bomba.
+
+Campos principais:
+
+- `enableNozzle`, `enableHose`, `nozzleModels`, `nozzleAnim`
+- `pumpModels`, `pumpStationRadius`, `pumpTargetDistance`, `pumpDrawDistance`
+- `maxPumpDistance`, `hoseLength`, `tankAttachDistance`, `refuelKeepDistance`
+- `tankBones`, `tankOffsets` (por modelo), `tankClassOffsets`, `tankFallbackSide`
+- `requireEngineOff`, `pumpLockTtlMs`, `undockKey`
+
+O servidor valida estação, bomba, lock da bomba, placa, `net_id`, proximidade, litros, preço e créditos pagos. O modelo nativo de combustível continua em `0..100`; por padrão `1 unidade = 1 litro` (`nativeUnitsPerLiter = 1.0`).
+
+### Calibração visual
+
+Com `Config.Debug = true`:
+
+- `/mfuel_diag` mostra mão, animação, origem do tanque, offset/rotação e mangueira.
+- `/mfuel_calibrate marker` liga/desliga o marker do ponto calculado do tanque.
+- `/mfuel_calibrate hand x y z rx ry rz` ajusta o bico na mão em runtime.
+- `/mfuel_calibrate tank x y z rx ry rz` ajusta o offset/rotação global no veículo.
+- `/mfuel_calibrate model x y z rx ry rz` ajusta somente o modelo do veículo atual; use o hash/display impresso para copiar a exceção para `tankBoneOffsets` ou `tankOffsets`.
+- `/mfuel_calibrate hose x y z` ajusta o ponto de conexão da mangueira no bico e recria a rope em runtime; copie o valor para `hoseNozzleOffset`.
+
+Os ajustes são apenas em memória para calibração; depois copie os valores para `Config.Refuel`.
+
 ### Config.Payment
 
 Controla o adapter de pagamento:
 
 - `enabled`: quando `false`, não cobra.
-- `allowFallbackWithoutMzCore`: fallback de teste sem `mz_core`. Em produção deve ficar `false`.
-- `accountAliases`: mapeia nomes como `cash` para contas reais do `mz_core`, como `wallet`.
+- O pagamento depende de `mz_economy` e falha fechado quando a autoridade financeira não está disponível.
+- `accountAliases`: mapeia nomes como `cash` para contas reais do `mz_economy`, como `wallet`.
 
 O client nunca define preço final confiável. O server recalcula com `Config.Refuel.pricePerLiter`.
 
@@ -123,11 +158,11 @@ Config.Interaction = {
 
 Prioridade real:
 
-1. `mz_target`, se um dia expuser API pública compatível.
-2. `mz_interact`, via `exports['mz_interact']:AddPoint`.
-3. Marker próprio do `mz_fuel`.
+1. `mz_target` em cada prop de bomba (`AddTargetModel`) e no veículo (`AddGlobalVehicle`).
+2. `mz_interact`, com um ponto dinâmico apenas na bomba mais próxima.
+3. Marker próprio pequeno na bomba e tecla contextual E/H.
 
-Com `mode = 'marker'`, somente marker é usado. Com `mode = 'none'`, nenhuma interação é criada.
+Com `mode = 'marker'`, somente marker é usado. Com `mode = 'none'`, nenhuma interação é criada. Com `physical = false`, o comportamento legado de posto no marker é preservado.
 
 ### Config.Notify
 
@@ -190,6 +225,11 @@ exports['mz_fuel']:GetCachedFuelByPlate(plate)
 ### Postos
 
 - `mz_fuel:server:payRefuel`
+- `mz_fuel:server:claimPump`
+- `mz_fuel:server:releasePump`
+- `mz_fuel:server:endRefuel`
+- `mz_fuel:client:pumpClaimResult`
+- `mz_fuel:client:interactPump`
 - `mz_fuel:client:startRefuel`
 - `mz_fuel:client:stopRefuel`
 - `mz_fuel:client:openRefuelMenu`
@@ -204,14 +244,17 @@ exports['mz_fuel']:GetCachedFuelByPlate(plate)
 ## Segurança
 
 - Fuel sempre é normalizado entre `0` e `100`.
-- Placa é normalizada com trim e upper antes de salvar.
-- Save vindo do client valida `source`, placa, fuel, net id quando disponível e permissão do veículo quando `mz_core` expõe acesso.
-- Aumento de fuel vindo do client precisa de crédito pago/autorizado.
+- O abastecimento é entity-first: a entidade real do veículo é a fonte de verdade; placa, proprietário e registro no banco não são requisitos.
+- Veículos NPC, alugados, importados e sem registro em `mz_vehicles` podem ser abastecidos normalmente.
+- `netId` é usado apenas para correlacionar a entidade de rede/sessão quando disponível; não é identidade persistente.
+- Placa é metadado auxiliar normalizado com trim e upper quando existir.
+- Persistência é opcional: se a placa existir em `mz_vehicles`, o save usa o owner existente; caso contrário, o client atualiza somente o fuel da entidade.
+- Aumento de fuel persistido precisa de crédito pago/autorizado. A sessão usa `vehicle_key`/`session_key`, não a placa.
 - Crédito pago de posto e crédito autorizado de galão possuem TTL.
-- Server recalcula preço e litros autorizados.
+- Server recalcula preço e litros autorizados e valida bomba/sessão/distância.
 - NUI envia apenas intenção: `fill`, `money` ou `liters`.
 - Bicicletas/classe `13` não consomem e não abastecem.
-- Pagamento fallback sem `mz_core` fica bloqueado por padrão.
+- Pagamento sem `mz_economy` é sempre bloqueado.
 
 ## Integração com mz_garagem
 
@@ -239,22 +282,26 @@ A garagem deve enviar o fuel junto com engine/body para persistência já existe
 - Consumo: dirigir como motorista e confirmar queda gradual do fuel.
 - Persistência: mudar fuel, aguardar save e reiniciar/respawnar veículo.
 - Garagem: retirar, consumir, guardar e retirar novamente.
-- Posto com menu: `Config.Refuel.useMenu = true`, testar completar, dinheiro, litros e cancelar.
-- Posto sem menu: `Config.Refuel.useMenu = false`, testar abastecimento direto.
-- Pagamento: confirmar desconto por tick.
-- Sem dinheiro: iniciar abastecimento e confirmar cancelamento sem tick grátis.
+- Físico: mirar na bomba com `ALT`, pegar o bico, confirmar prop na mão e mangueira.
+- Físico: encaixar no `petrolcap` (ou fallback configurado), abrir menu e abastecer.
+- Físico: confirmar que o bico acompanha o veículo quando ele se move lentamente.
+- Físico: devolver o bico e confirmar que prop, rope e lock são limpos.
+- Físico: dois jogadores na mesma bomba/veículo; o segundo deve ser recusado.
+- Físico: afastar, entrar no veículo, morrer, deletar veículo e reiniciar resource.
+- Menu: completar tanque, valor em R$, litros e cancelar.
+- Pagamento: confirmar desconto por tick e bloqueio sem dinheiro.
 - Galão: habilitar `Config.JerryCan.enabled`, usar item perto de veículo válido.
-- Cancelamentos: afastar, morrer, deletar veículo, sair do banco do motorista.
-- mz_interact: iniciar com `mz_interact` started e confirmar pontos sem marker duplicado.
-- Fallback marker: parar `mz_interact` e confirmar marker próprio.
+- mz_target: iniciar/parar o resource e confirmar re-registro/limpeza.
+- mz_interact: sem `mz_target`, confirmar ponto dinâmico por bomba.
+- Marker: sem target/interact, confirmar marker pequeno e tecla E/H.
+- Debug: com `Config.Debug=true`, usar `/mfuel_diag` para bomba, veículo, bone, offset, sessão e motivo de cancelamento.
 - Debug com ACE: habilitar comandos e testar `/mfuel_get`, `/mfuel_set`, `/mfuel_refill`.
-- Debug sem ACE: confirmar comandos bloqueados.
 
 ## Troubleshooting
 
 ### Fuel não salva
 
-- Confira se `mz_core` está iniciado.
+- Confira se `mz_vehicles` está iniciado e `IsVehicleDomainReady` retorna sucesso.
 - Confira se `Config.SaveIntervalMs` não está atrasando o save por throttle.
 - Veja se a placa está chegando normalizada e se o veículo pertence/acessa o player.
 - Para aumento de fuel vindo do client, confirme que houve crédito pago/autorizado.
@@ -270,14 +317,14 @@ A garagem deve enviar o fuel junto com engine/body para persistência já existe
 - Confira `Config.Payment.enabled`.
 - Confira `Config.Refuel.pricePerLiter`.
 - Confira `Config.Refuel.paymentAccount` e `Config.Payment.accountAliases`.
-- Confirme se `mz_core` expõe `GetMoney` e `RemoveMoney`.
+- Confirme se `mz_economy` expõe `GetMoney` e `RemoveMoney`.
 
 ### Menu não abre
 
 - Confira `Config.Refuel.useMenu = true`.
 - Confira se o player está perto de um posto configurado.
 - Confira se o veículo é válido, não é bicicleta e não está cheio.
-- Confira `Config.Refuel.allowInsideVehicle` e `Config.Refuel.requireDriver`.
+- Confira `Config.Refuel.allowInsideVehicle`, `Config.Refuel.requireDriver` e `Config.Refuel.physical`.
 
 ### NUI fica presa
 
@@ -290,7 +337,7 @@ A garagem deve enviar o fuel junto com engine/body para persistência já existe
 - Confira `Config.Stations.enabled`.
 - Confira `Config.Interaction.mode`.
 - Se `mode = 'none'`, nenhum ponto é criado.
-- Se `mode = 'auto'` com `mz_interact` ativo, o marker próprio não aparece para evitar duplicidade.
+- Se `mode = 'auto'` com `mz_target` ativo, ele tem prioridade e o marker próprio não aparece.
 
 ### mz_interact não cria ponto
 
@@ -319,8 +366,7 @@ add_ace group.mz_owner mz_fuel.debug allow
 
 ### Pagamento bloqueado por Config.Payment
 
-- Se `mz_core` não estiver iniciado e `allowFallbackWithoutMzCore = false`, o abastecimento é bloqueado.
-- Para teste local controlado, habilite `allowFallbackWithoutMzCore = true`.
+- Se `mz_economy` não estiver iniciado, o abastecimento pago é bloqueado sem fallback gratuito.
 - Para produção, mantenha o fallback bloqueado.
 
 ## Status v1.0.0-dev/stable
@@ -334,7 +380,9 @@ add_ace group.mz_owner mz_fuel.debug allow
 
 ## Pendências pós-1.0
 
-- API pública compatível no `mz_target` para pontos externos.
+- Validar em runtime FiveM os modelos de bomba, o bone `petrolcap` e os offsets de tanque em veículos importados/motos.
+- Ajustar `nozzleHandOffset`/`nozzleHandRotation` e `nozzleVehicleOffset` visualmente se o prop não encostar perfeitamente na mão/tanque.
+- Validar o rope/hose em builds e configurações de CEF/streaming diferentes.
 - UI mais rica somente se necessário.
 - Logs formais no `mz_core`, caso o core exponha export público.
 - Metadata de galão parcial no inventário, se o inventário suportar capacidade por item.

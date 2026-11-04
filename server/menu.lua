@@ -8,15 +8,6 @@ local function normalizePlate(plate)
   return MZFuelPersistence.NormalizePlate(plate)
 end
 
-local function sessionPlate(source, plate)
-  plate = normalizePlate(plate)
-  if plate ~= '' then
-    return plate
-  end
-
-  return ('TEMP:%s'):format(tostring(source or 0))
-end
-
 local function clampFuel(value)
   return MZFuelPersistence.ClampFuel(value)
 end
@@ -95,36 +86,66 @@ local function normalizeAccount(account)
   return tostring(aliases[account] or account)
 end
 
-local function validateStationDistance(source, station)
-  if type(station) ~= 'table' then
-    return false
-  end
-
-  local x = tonumber(station.x)
-  local y = tonumber(station.y)
-  local z = tonumber(station.z)
-  if not x or not y or not z then
-    return false
-  end
-
+local function validateStationDistance(source, station, pump, stationId)
   local ped = GetPlayerPed(source)
   if not ped or ped == 0 then
     return false
   end
 
-  local stationCoords = vector3(x, y, z)
-  local maxDistance = tonumber(refuelConfig().maxDistance) or 6.0
-  if #(GetEntityCoords(ped) - stationCoords) > maxDistance then
-    return false
-  end
+  local hasPump = type(pump) == 'table'
+  local stationCoords = nil
 
-  for _, configuredStation in ipairs(Config.Stations and Config.Stations.locations or {}) do
-    if #(stationCoords - configuredStation) <= 1.5 then
-      return true
+  if type(station) == 'table' then
+    local x = tonumber(station.x)
+    local y = tonumber(station.y)
+    local z = tonumber(station.z)
+    if x and y and z then
+      stationCoords = vector3(x, y, z)
     end
   end
 
-  return false
+  if not stationCoords and not hasPump then
+    return false
+  end
+
+  if stationCoords then
+    local maxDistance = tonumber(refuelConfig().maxDistance) or 6.0
+    if hasPump then
+      maxDistance = math.max(
+        maxDistance,
+        (tonumber(refuelConfig().pumpStationRadius) or 40.0)
+          + (tonumber(refuelConfig().maxPumpDistance) or 10.0)
+      )
+    end
+
+    if #(GetEntityCoords(ped) - stationCoords) > maxDistance then
+      return false
+    end
+
+    local matched = false
+    for _, configuredStation in ipairs(Config.Stations and Config.Stations.locations or {}) do
+      if #(stationCoords - configuredStation) <= 1.5 then
+        matched = true
+        break
+      end
+    end
+
+    if not matched and not hasPump then
+      return false
+    end
+  end
+
+  if hasPump then
+    if not MZFuelPumpsServer or not MZFuelPumpsServer.ValidatePump then
+      return false
+    end
+
+    if MZFuelPumpsServer.ValidatePump(source, pump, stationId, station) ~= true then
+      return false
+    end
+  end
+
+  return true
 end
 
 local function getPlayerBalance(source)
@@ -132,16 +153,12 @@ local function getPlayerBalance(source)
     return math.huge
   end
 
-  if GetResourceState('mz_core') ~= 'started' then
-    if Config.Payment and Config.Payment.allowFallbackWithoutMzCore == true then
-      return math.huge
-    end
-
+  if GetResourceState('mz_economy') ~= 'started' then
     return nil, 'payment_unavailable'
   end
 
   local ok, money = pcall(function()
-    return exports['mz_core']:GetMoney(source)
+    return exports['mz_economy']:GetMoney(source)
   end)
 
   if not ok or type(money) ~= 'table' then
@@ -160,16 +177,25 @@ local function estimatePrice(liters)
   return math.max(0, math.floor(((tonumber(liters) or 0.0) * pricePerLiter) + 0.5))
 end
 
-local function makeSessionToken(source, plate)
-  return ('%s:%s:%s:%s'):format(source, sessionPlate(source, plate), GetGameTimer(), math.random(100000, 999999))
+local function normalizeVehicleKey(value, source)
+  value = tostring(value or '')
+  if value ~= '' then
+    return value
+  end
+
+  return ('source:%s'):format(tostring(source or 0))
 end
 
-local function sessionKey(source, plate, token)
-  return ('%s:%s:%s'):format(tostring(source or 0), sessionPlate(source, plate), tostring(token or ''))
+local function makeSessionToken(source, vehicleKey)
+  return ('%s:%s:%s:%s'):format(source, normalizeVehicleKey(vehicleKey, source), GetGameTimer(), math.random(100000, 999999))
 end
 
-local function requestKey(source, plate, requestId)
-  return ('%s:%s:%s'):format(tostring(source or 0), sessionPlate(source, plate), tostring(requestId or ''))
+local function sessionKey(source, vehicleKey, token)
+  return ('%s:%s:%s'):format(tostring(source or 0), normalizeVehicleKey(vehicleKey, source), tostring(token or ''))
+end
+
+local function requestKey(source, vehicleKey, requestId)
+  return ('%s:%s:%s'):format(tostring(source or 0), normalizeVehicleKey(vehicleKey, source), tostring(requestId or ''))
 end
 
 local function cleanupSessions()
@@ -189,13 +215,22 @@ local function cleanupSessions()
   end
 end
 
-local function clearSessionsForSourcePlate(source, plate)
+local function clearSessionsForSourceVehicle(source, vehicleKey)
   source = tonumber(source) or 0
-  plate = sessionPlate(source, plate)
+  vehicleKey = normalizeVehicleKey(vehicleKey, source)
 
   for key, session in pairs(Sessions) do
     if type(session) ~= 'table'
-      or (tonumber(session.source) == source and sessionPlate(source, session.plate) == plate) then
+      or (tonumber(session.source) == source and normalizeVehicleKey(session.vehicleKey, source) == vehicleKey) then
+      Sessions[key] = nil
+    end
+  end
+end
+
+local function clearSessionsForSource(source)
+  source = tonumber(source) or 0
+  for key, session in pairs(Sessions) do
+    if type(session) ~= 'table' or tonumber(session.source) == source then
       Sessions[key] = nil
     end
   end
@@ -217,14 +252,38 @@ local function isRequestRateLimited(source)
   return false
 end
 
-local function createSession(source, plate, netId, liters)
-  clearSessionsForSourcePlate(source, plate)
+local function findActiveSessionForVehicle(source, vehicleKey)
+  cleanupSessions()
+  vehicleKey = normalizeVehicleKey(vehicleKey, source)
+  source = tonumber(source) or 0
 
-  local token = makeSessionToken(source, plate)
-  local key = sessionKey(source, plate, token)
+  for _, session in pairs(Sessions) do
+    if type(session) == 'table'
+      and normalizeVehicleKey(session.vehicleKey, source) == vehicleKey
+      and tonumber(session.source) ~= source
+      and (tonumber(session.expiresAt) or 0) > GetGameTimer() then
+      return session
+    end
+  end
+
+  return nil
+end
+
+local function createSession(source, vehicleKey, netId, liters, plate)
+  vehicleKey = normalizeVehicleKey(vehicleKey, source)
+  local busy = findActiveSessionForVehicle(source, vehicleKey)
+  if busy then
+    return nil, 'vehicle_busy'
+  end
+
+  clearSessionsForSourceVehicle(source, vehicleKey)
+
+  local token = makeSessionToken(source, vehicleKey)
+  local key = sessionKey(source, vehicleKey, token)
   Sessions[key] = {
     source = tonumber(source) or 0,
-    plate = sessionPlate(source, plate),
+    vehicleKey = vehicleKey,
+    plate = normalizePlate(plate),
     netId = tonumber(netId) or 0,
     litersRemaining = tonumber(liters) or 0.0,
     expiresAt = GetGameTimer() + math.max(60000, tonumber(refuelConfig().paidCreditTtlMs) or 120000)
@@ -233,17 +292,17 @@ local function createSession(source, plate, netId, liters)
   return token
 end
 
-local function isRequestCanceled(source, plate, requestId)
+local function isRequestCanceled(source, vehicleKey, requestId)
   requestId = tostring(requestId or '')
   if requestId == '' then
     return false
   end
 
   cleanupSessions()
-  return CanceledRequests[requestKey(source, plate, requestId)] ~= nil
+  return CanceledRequests[requestKey(source, vehicleKey, requestId)] ~= nil
 end
 
-function MZFuelMenu.GetSessionLiters(source, plate, token, requestedLiters, netId)
+function MZFuelMenu.GetSessionLiters(source, vehicleKey, token, requestedLiters, netId)
   cleanupSessions()
 
   requestedLiters = normalizeNumber(requestedLiters, tonumber(refuelConfig().litersPerTick) or 1.0)
@@ -256,12 +315,13 @@ function MZFuelMenu.GetSessionLiters(source, plate, token, requestedLiters, netI
     return nil
   end
 
-  local session = Sessions[sessionKey(source, plate, token)]
+  local session = Sessions[sessionKey(source, vehicleKey, token)]
   if type(session) ~= 'table' then
     return nil
   end
 
-  if tonumber(session.source) ~= tonumber(source) or sessionPlate(source, session.plate) ~= sessionPlate(source, plate) then
+  if tonumber(session.source) ~= tonumber(source)
+    or normalizeVehicleKey(session.vehicleKey, source) ~= normalizeVehicleKey(vehicleKey, source) then
     return nil
   end
 
@@ -273,8 +333,8 @@ function MZFuelMenu.GetSessionLiters(source, plate, token, requestedLiters, netI
   return math.min(requestedLiters, remaining)
 end
 
-function MZFuelMenu.CommitSessionLiters(source, plate, token, liters)
-  local key = sessionKey(source, plate, token)
+function MZFuelMenu.CommitSessionLiters(source, vehicleKey, token, liters)
+  local key = sessionKey(source, vehicleKey, token)
   local session = Sessions[key]
   if type(session) ~= 'table' then
     return false
@@ -312,19 +372,44 @@ RegisterNetEvent('mz_fuel:server:requestMenuRefuel', function(payload)
   local mode = tostring(payload.mode or ''):lower()
   local plate = normalizePlate(payload.plate)
   local netId = tonumber(payload.net_id or payload.netId) or 0
+  local vehicleKey = normalizeVehicleKey(payload.vehicle_key or payload.vehicleKey, src)
   local requestId = tostring(payload.request_id or payload.requestId or '')
+  local stationId = tonumber(payload.station_id or payload.stationId) or 0
+  local physical = payload.physical == true
+  local pump = physical and (payload.pump or payload.pumpCoords) or nil
+  local pumpKey = tostring(payload.pump_key or payload.pumpKey or '')
 
-  if isRequestCanceled(src, plate, requestId) then
+  if physical and refuelConfig().physical ~= true then
+    TriggerClientEvent('mz_fuel:client:refuelMenuAuthorized', src, { ok = false, error = 'physical_disabled' })
+    return
+  end
+
+  if physical and (pumpKey == '' or not MZFuelPumpsServer or MZFuelPumpsServer.IsLockedBy(src, pumpKey) ~= true) then
+    TriggerClientEvent('mz_fuel:client:refuelMenuAuthorized', src, { ok = false, error = 'pump_not_claimed' })
+    return
+  end
+
+  if physical and type(pump) ~= 'table' then
+    TriggerClientEvent('mz_fuel:client:refuelMenuAuthorized', src, { ok = false, error = 'pump_distance_invalid' })
+    return
+  end
+
+  if isRequestCanceled(src, vehicleKey, requestId) then
     TriggerClientEvent('mz_fuel:client:refuelMenuAuthorized', src, { ok = false, error = 'canceled' })
     return
   end
 
-  if validateStationDistance(src, payload.station) ~= true then
+  if validateStationDistance(src, payload.station, pump, stationId) ~= true then
     TriggerClientEvent('mz_fuel:client:refuelMenuAuthorized', src, { ok = false, error = 'too_far' })
     return
   end
 
-  local currentFuel = clampFuel(payload.fuel_before or payload.fuelBefore or 0.0)
+  -- O servidor usa o menor valor entre o fuel persistido e o informado pelo
+  -- client. Isso evita travar o menu com um cache antigo e nunca permite que o
+  -- client alegue um tanque maior para receber combustivel indevido.
+  local storedFuel = plate ~= '' and MZFuelPersistence.GetStoredFuelByPlate(plate) or nil
+  local payloadFuel = clampFuel(payload.fuel_before or payload.fuelBefore or 0.0)
+  local currentFuel = storedFuel ~= nil and math.min(storedFuel, payloadFuel) or payloadFuel
   local missing = math.max(0.0, (tonumber(Config.MaxFuel) or 100.0) - currentFuel)
   local maxRequest = math.min(tonumber(refuelConfig().maxLitersPerRequest) or 100.0, tonumber(Config.MaxFuel) or 100.0)
   if maxRequest <= 0.0 or maxRequest ~= maxRequest or maxRequest == math.huge then
@@ -381,18 +466,39 @@ RegisterNetEvent('mz_fuel:server:requestMenuRefuel', function(payload)
   end
 
   cleanupSessions()
-  if isRequestCanceled(src, plate, requestId) then
+  if isRequestCanceled(src, vehicleKey, requestId) then
     TriggerClientEvent('mz_fuel:client:refuelMenuAuthorized', src, { ok = false, error = 'canceled' })
+    return
+  end
+
+  local sessionToken, sessionError = createSession(src, vehicleKey, netId, liters, plate)
+  if not sessionToken then
+    TriggerClientEvent('mz_fuel:client:refuelMenuAuthorized', src, {
+      ok = false,
+      error = sessionError or 'vehicle_busy'
+    })
     return
   end
 
   TriggerClientEvent('mz_fuel:client:refuelMenuAuthorized', src, {
     ok = true,
-    session = createSession(src, plate, netId, liters),
+    session = sessionToken,
+    vehicle_key = vehicleKey,
     liters = liters,
     price = price,
     net_id = netId
   })
+end)
+
+RegisterNetEvent('mz_fuel:server:endRefuel', function(payload)
+  local src = source
+  payload = type(payload) == 'table' and payload or {}
+  if not isValidSource(src) then
+    return
+  end
+
+  local vehicleKey = normalizeVehicleKey(payload.vehicle_key or payload.vehicleKey, src)
+  clearSessionsForSourceVehicle(src, vehicleKey)
 end)
 
 RegisterNetEvent('mz_fuel:server:cancelMenuRefuel', function(payload)
@@ -403,13 +509,17 @@ RegisterNetEvent('mz_fuel:server:cancelMenuRefuel', function(payload)
     return
   end
 
-  local plate = normalizePlate(payload.plate)
+  local vehicleKey = normalizeVehicleKey(payload.vehicle_key or payload.vehicleKey, src)
   local requestId = tostring(payload.request_id or payload.requestId or '')
 
-  clearSessionsForSourcePlate(src, plate)
+  clearSessionsForSourceVehicle(src, vehicleKey)
   if requestId ~= '' then
-    CanceledRequests[requestKey(src, plate, requestId)] = GetGameTimer() + 5000
+    CanceledRequests[requestKey(src, vehicleKey, requestId)] = GetGameTimer() + 5000
   end
+end)
+
+AddEventHandler('playerDropped', function()
+  clearSessionsForSource(source)
 end)
 
 CreateThread(function()

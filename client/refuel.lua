@@ -11,7 +11,14 @@ local RefuelState = {
   menuSession = nil,
   netId = 0,
   stationId = nil,
-  lastStopReason = nil
+  lastStopReason = nil,
+  physical = false,
+  pump = nil,
+  stationCenter = nil,
+  vehicleKey = nil,
+  sessionKey = nil,
+  pendingPaymentAt = nil,
+  progressTarget = nil
 }
 
 local RefuelConfigOk = true
@@ -35,6 +42,17 @@ local function debugPrint(tag, fields)
   print(('[mz_fuel][%s] %s'):format(tostring(tag), table.concat(parts, ' ')))
 end
 
+local function text(key, fallback)
+  if type(MZFuelText) == 'function' then
+    local value = MZFuelText(key, nil)
+    if value and value ~= key then
+      return value
+    end
+  end
+
+  return fallback or key
+end
+
 local function stopProgress()
   if MZFuelNotify and MZFuelNotify.StopProgress then
     MZFuelNotify.StopProgress('refuel')
@@ -42,9 +60,21 @@ local function stopProgress()
 end
 
 local function startProgress(durationMs)
+  -- O fluxo com menu usa o overlay da NUI. O progresso nativo fica para o
+  -- caminho legado sem menu e para outros consumidores.
+  if Config.Refuel and Config.Refuel.useMenu == true then
+    return
+  end
+
   if MZFuelNotify and MZFuelNotify.StartProgress then
     MZFuelNotify.StartProgress('refuel', MZFuelNotify.Message('refuelStarted', 'Abastecimento iniciado.'), durationMs)
   end
+end
+
+local function drawHelp(message)
+  BeginTextCommandDisplayHelp('STRING')
+  AddTextComponentSubstringPlayerName(message)
+  EndTextCommandDisplayHelp(0, false, true, 1)
 end
 
 local function isPositiveNumber(value)
@@ -139,16 +169,26 @@ end
 local function notifyRefuelError(reason)
   reason = tostring(reason or '')
 
-  if reason == 'not_enough_money' then
+  if reason == 'not_enough_money' or reason == 'insufficient_funds' or reason == 'insufficient_balance' then
     notifyKey('noMoney', 'error', 'Dinheiro insuficiente.')
   elseif reason == 'driver_required' or reason == 'left_driver_seat' or reason == 'not_driver' then
     notifyKey('driverRequired', 'error', 'Entre no banco do motorista para abastecer.')
-  elseif reason == 'too_far' or reason == 'station_distance_invalid' then
+  elseif reason == 'too_far' or reason == 'station_distance_invalid' or reason == 'pump_distance_invalid' then
     notifyKey('tooFar', 'error', 'Voce esta longe demais do posto.')
   elseif reason == 'vehicle_full' then
     notifyKey('vehicleFull', 'inform', 'O veiculo ja esta cheio.')
+  elseif reason == 'engine_running' then
+    notifyKey('engineRunning', 'error', 'Desligue o motor antes de abastecer.')
+  elseif reason == 'physical_required' or reason == 'nozzle_not_docked' or reason == 'pump_not_claimed' then
+    notifyKey('physicalRequired', 'error', 'Pegue o bico da bomba e encaixe no tanque primeiro.')
+  elseif reason == 'inside_vehicle_blocked' then
+    notifyKey('insideVehicleBlocked', 'error', 'Saia do veiculo para abastecer.')
+  elseif reason == 'vehicle_busy' or reason == 'pump_busy' then
+    notifyKey('vehicleBusy', 'inform', 'Este veiculo ja esta sendo abastecido por outro jogador.')
   elseif reason == 'payment_unavailable' or reason == 'invalid_price' or reason == 'config_invalid' or reason == 'payment_failed' then
     notifyKey('paymentUnavailable', 'error', 'Pagamento indisponivel.')
+  elseif reason == 'payment_timeout' then
+    notifyKey('paymentTimeout', 'inform', 'Pagamento nao respondeu. Tente novamente.')
   elseif reason == 'rate_limited' then
     notifyKey('rateLimited', 'inform', 'Aguarde um instante para tentar novamente.')
   else
@@ -164,6 +204,11 @@ local function getPedVehicle()
   end
 
   return 0
+end
+
+local function isEngineRunning(vehicle)
+  local value = GetIsVehicleEngineRunning(vehicle)
+  return value == true or value == 1
 end
 
 local function isPlayerDead()
@@ -187,7 +232,9 @@ local function normalizeLiters(value)
   return liters + 0.0
 end
 
-local function isValidRefuelVehicle(vehicle)
+local function isValidRefuelVehicle(vehicle, options)
+  options = type(options) == 'table' and options or {}
+  local physical = options.physical == true
   local ped = PlayerPedId()
 
   if Config.Refuel and Config.Refuel.allowInsideVehicle == false and IsPedInAnyVehicle(PlayerPedId(), false) then
@@ -204,6 +251,23 @@ local function isValidRefuelVehicle(vehicle)
 
   if Config.Refuel and Config.Refuel.requireDriver == true and GetPedInVehicleSeat(vehicle, -1) ~= ped then
     return false, 'driver_required'
+  end
+
+  if Config.Refuel and Config.Refuel.requireEngineOff == true and isEngineRunning(vehicle) then
+    return false, 'engine_running'
+  end
+
+  if physical then
+    if not MZFuelNozzle or not MZFuelNozzle.IsDockedTo(vehicle) then
+      return false, 'nozzle_not_docked'
+    end
+
+    local vehicleCoords = GetEntityCoords(vehicle)
+    local playerCoords = GetEntityCoords(ped)
+    local keepDistance = tonumber(Config.Refuel and Config.Refuel.refuelKeepDistance) or 5.0
+    if #(playerCoords - vehicleCoords) > keepDistance + 1.5 then
+      return false, 'too_far'
+    end
   end
 
   local fuel = MZFuel.GetFuel(vehicle) or 0.0
@@ -231,8 +295,8 @@ function MZFuelRefuel.IsRefueling()
   return RefuelState.active == true
 end
 
-function MZFuelRefuel.CanRefuel(vehicle)
-  return isValidRefuelVehicle(vehicle)
+function MZFuelRefuel.CanRefuel(vehicle, physical)
+  return isValidRefuelVehicle(vehicle, { physical = physical == true })
 end
 
 function MZFuelRefuel.Stop(reason, silent)
@@ -241,19 +305,42 @@ function MZFuelRefuel.Stop(reason, silent)
   end
 
   local vehicle = RefuelState.vehicle
+  local plate = RefuelState.plate
+  local menuSession = RefuelState.menuSession
+  local vehicleKey = RefuelState.vehicleKey
+  local sessionKey = RefuelState.sessionKey
   RefuelState.active = false
   RefuelState.pendingPayment = false
+  RefuelState.pendingPaymentAt = nil
   RefuelState.targetLiters = nil
   RefuelState.usedLiters = 0.0
   RefuelState.menuSession = nil
   RefuelState.netId = 0
   RefuelState.stationId = nil
+  RefuelState.physical = false
+  RefuelState.pump = nil
+  RefuelState.stationCenter = nil
+  RefuelState.vehicleKey = nil
+  RefuelState.sessionKey = nil
+  RefuelState.progressTarget = nil
   RefuelState.lastStopReason = tostring(reason or 'stopped')
   stopProgress()
+
+  if MZFuelMenu and MZFuelMenu.HideProgress then
+    MZFuelMenu.HideProgress()
+  end
+
+  TriggerServerEvent('mz_fuel:server:endRefuel', {
+    plate = plate,
+    vehicle_key = vehicleKey,
+    session_key = sessionKey or menuSession,
+    menu_session = menuSession
+  })
 
   if Config.Refuel and Config.Refuel.saveOnComplete ~= false and vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
     TriggerServerEvent('mz_fuel:server:saveFuel', MZFuel.GetPlate(vehicle), MZFuel.GetFuel(vehicle), {
       net_id = getVehicleNetId(vehicle),
+      session_key = sessionKey,
       engine = GetVehicleEngineHealth(vehicle),
       body = GetVehicleBodyHealth(vehicle),
       force = true
@@ -300,17 +387,42 @@ local function validateActiveState()
     return false
   end
 
+  if RefuelState.physical == true then
+    if not MZFuelNozzle or not MZFuelNozzle.IsDockedTo(vehicle) then
+      MZFuelRefuel.Stop('nozzle_not_docked')
+      return false
+    end
+
+    if Config.Refuel and Config.Refuel.requireEngineOff == true and isEngineRunning(vehicle) then
+      MZFuelRefuel.Stop('engine_running')
+      return false
+    end
+
+    local keepDistance = tonumber(Config.Refuel and Config.Refuel.refuelKeepDistance) or 5.0
+    if #(GetEntityCoords(PlayerPedId()) - GetEntityCoords(vehicle)) > keepDistance + 1.5 then
+      MZFuelRefuel.Stop('too_far')
+      return false
+    end
+  end
+
   local distance = distanceToStation(RefuelState.station)
-  if distance and distance > (tonumber(Config.Refuel and Config.Refuel.maxDistance) or 6.0) then
+  local maxDistance = tonumber(Config.Refuel and Config.Refuel.maxDistance) or 6.0
+  if RefuelState.physical == true then
+    maxDistance = math.max(maxDistance, tonumber(Config.Refuel and Config.Refuel.maxPumpDistance) or 10.0)
+  end
+
+  if distance and distance > maxDistance then
     MZFuelRefuel.Stop('too_far')
     return false
   end
 
-  local ok, reason = isValidRefuelVehicle(vehicle)
+  local ok, reason = isValidRefuelVehicle(vehicle, { physical = RefuelState.physical == true })
   if not ok then
     MZFuelRefuel.Stop(reason, reason == 'vehicle_full')
     if reason == 'vehicle_full' then
       notifyKey('vehicleFull', 'inform', 'O veiculo ja esta cheio.')
+    elseif reason == 'engine_running' then
+      notifyKey('engineRunning', 'error', 'Desligue o motor antes de abastecer.')
     end
     return false
   end
@@ -340,7 +452,16 @@ local function requestPayment()
   end
 
   RefuelState.pendingPayment = true
+  RefuelState.pendingPaymentAt = GetGameTimer()
   startProgress(math.max(250, tonumber(Config.Refuel and Config.Refuel.tickMs) or 1000))
+
+  if MZFuelMenu and MZFuelMenu.SetProgress and RefuelState.progressTarget and RefuelState.progressTarget > 0.0 then
+    MZFuelMenu.SetProgress(
+      (tonumber(RefuelState.usedLiters) or 0.0) / RefuelState.progressTarget,
+      RefuelState.usedLiters or 0.0,
+      RefuelState.progressTarget
+    )
+  end
 
   debugPrint('client_pay_tick', {
     vehicle = vehicle,
@@ -349,20 +470,36 @@ local function requestPayment()
     plate = MZFuel.GetPlate(vehicle),
     fuelBefore = currentFuel,
     litersRequested = liters,
-    stationId = RefuelState.stationId
+    stationId = RefuelState.stationId,
+    physical = RefuelState.physical == true,
+    pump = RefuelState.pump and RefuelState.pump.pumpKey or 'none'
   })
+
+  local payloadStation = RefuelState.station
+  if RefuelState.physical then
+    payloadStation = RefuelState.stationCenter or (RefuelState.pump and RefuelState.pump.station) or RefuelState.station
+  end
 
   TriggerServerEvent('mz_fuel:server:payRefuel', {
     plate = MZFuel.GetPlate(vehicle),
     liters = liters,
     net_id = netId,
+    vehicle_key = RefuelState.vehicleKey,
+    session_key = RefuelState.sessionKey,
     station_id = RefuelState.stationId,
     fuel_before = currentFuel,
     menu_session = RefuelState.menuSession,
-    station = RefuelState.station and {
-      x = RefuelState.station.x,
-      y = RefuelState.station.y,
-      z = RefuelState.station.z
+    physical = RefuelState.physical == true,
+    pump_key = RefuelState.pump and RefuelState.pump.pumpKey or nil,
+    pump = RefuelState.pump and {
+      x = RefuelState.pump.coords.x,
+      y = RefuelState.pump.coords.y,
+      z = RefuelState.pump.coords.z
+    } or nil,
+    station = payloadStation and {
+      x = payloadStation.x,
+      y = payloadStation.y,
+      z = payloadStation.z
     } or nil
   })
 end
@@ -370,8 +507,26 @@ end
 local function runRefuelLoop()
   CreateThread(function()
     local tickMs = math.max(250, tonumber(Config.Refuel and Config.Refuel.tickMs) or 1000)
+    local paymentTimeoutMs = math.max(5000, tickMs * 8)
 
     while RefuelState.active == true do
+      local cancelKey = tonumber(Config.Refuel and Config.Refuel.cancelKey) or 177
+      if IsControlJustPressed(0, cancelKey) then
+        notifyKey('refuelCanceled', 'inform', 'Abastecimento cancelado.')
+        MZFuelRefuel.Stop('user_canceled', true)
+        break
+      end
+
+      drawHelp(text('prompt.cancelRefuel', '[BACKSPACE] Cancelar abastecimento'))
+
+      if RefuelState.pendingPayment == true
+        and RefuelState.pendingPaymentAt
+        and (GetGameTimer() - RefuelState.pendingPaymentAt) > paymentTimeoutMs then
+        MZFuelRefuel.Stop('payment_timeout', true)
+        notifyRefuelError('payment_timeout')
+        break
+      end
+
       if validateActiveState() then
         requestPayment()
       end
@@ -396,20 +551,42 @@ function MZFuelRefuel.Start(vehicle, station, options)
   end
 
   options = type(options) == 'table' and options or {}
+  local physical = options.physical == true
   vehicle = vehicle or getRefuelVehicle()
-  debugVehicleSnapshot('client_start', vehicle)
+  debugVehicleSnapshot('client_start', vehicle, {
+    physical = physical,
+    pump = options.pump and options.pump.pumpKey or 'none'
+  })
 
-  local ok, reason = isValidRefuelVehicle(vehicle)
+  local ok, reason = isValidRefuelVehicle(vehicle, { physical = physical })
   if not ok then
     notifyRefuelError(reason)
     return false, reason
   end
 
+  if physical and not options.pump then
+    notifyRefuelError('physical_required')
+    return false, 'physical_required'
+  end
+
   local netId = getVehicleNetId(vehicle)
+  local vehicleKey = tostring(options.vehicleKey or '')
+  if vehicleKey == '' then
+    vehicleKey = netId > 0 and ('net:%s'):format(netId) or ('local:%s:%s'):format(GetGameTimer(), math.random(100000, 999999))
+  end
+  local sessionKey = tostring(options.sessionKey or '')
+  if sessionKey == '' then
+    sessionKey = ('session:%s:%s'):format(GetGameTimer(), math.random(100000, 999999))
+  end
 
   if station then
+    local maxDistance = tonumber(Config.Refuel and Config.Refuel.maxDistance) or 6.0
+    if physical then
+      maxDistance = math.max(maxDistance, tonumber(Config.Refuel and Config.Refuel.maxPumpDistance) or 10.0)
+    end
+
     local distance = distanceToStation(station)
-    if distance and distance > (tonumber(Config.Refuel and Config.Refuel.maxDistance) or 6.0) then
+    if distance and distance > maxDistance then
       return false, 'too_far'
     end
   end
@@ -419,15 +596,26 @@ function MZFuelRefuel.Start(vehicle, station, options)
   RefuelState.station = station
   RefuelState.plate = MZFuel.GetPlate(vehicle)
   RefuelState.pendingPayment = false
+  RefuelState.pendingPaymentAt = nil
   RefuelState.targetLiters = tonumber(options.targetLiters)
   RefuelState.usedLiters = 0.0
   RefuelState.menuSession = options.menuSession
   RefuelState.netId = netId
   RefuelState.stationId = tonumber(options.stationId) or getStationId(station)
+  RefuelState.physical = physical
+  RefuelState.pump = options.pump
+  RefuelState.stationCenter = options.stationCenter or (options.pump and options.pump.station) or nil
+  RefuelState.vehicleKey = vehicleKey
+  RefuelState.sessionKey = sessionKey
+  RefuelState.progressTarget = RefuelState.targetLiters
+    or math.max(0.0, (tonumber(Config.MaxFuel) or 100.0) - (MZFuel.GetFuel(vehicle) or 0.0))
   RefuelState.lastStopReason = nil
 
   notifyKey('refuelStarted', 'inform', 'Abastecimento iniciado.')
   startProgress(math.max(250, tonumber(Config.Refuel and Config.Refuel.tickMs) or 1000))
+  if MZFuelMenu and MZFuelMenu.SetProgress and RefuelState.progressTarget and RefuelState.progressTarget > 0.0 then
+    MZFuelMenu.SetProgress(0.0, 0.0, RefuelState.progressTarget)
+  end
   runRefuelLoop()
   return true
 end
@@ -451,6 +639,7 @@ RegisterNetEvent('mz_fuel:client:refuelPaid', function(result)
   end
 
   RefuelState.pendingPayment = false
+  RefuelState.pendingPaymentAt = nil
   result = type(result) == 'table' and result or {}
 
   if result.ok ~= true then
@@ -471,19 +660,47 @@ RegisterNetEvent('mz_fuel:client:refuelPaid', function(result)
 
   MZFuel.AddFuel(vehicle, liters)
   RefuelState.usedLiters = (tonumber(RefuelState.usedLiters) or 0.0) + liters
+
+  if MZFuelMenu and MZFuelMenu.SetProgress and RefuelState.progressTarget and RefuelState.progressTarget > 0.0 then
+    MZFuelMenu.SetProgress(
+      RefuelState.usedLiters / RefuelState.progressTarget,
+      RefuelState.usedLiters,
+      RefuelState.progressTarget
+    )
+  end
+
   if (MZFuel.GetFuel(vehicle) or 0.0) >= (tonumber(Config.MaxFuel) or 100.0)
     or (RefuelState.targetLiters and RefuelState.usedLiters >= (RefuelState.targetLiters - 0.01)) then
     notifyKey('refuelFinished', 'success', 'Veiculo abastecido.')
-    MZFuelRefuel.Stop('vehicle_full', true)
+    MZFuelRefuel.Stop('target_reached', true)
   end
 end)
+
+function MZFuelRefuel.GetDiagnostics()
+  return {
+    active = RefuelState.active == true,
+    pending_payment = RefuelState.pendingPayment == true,
+    vehicle = RefuelState.vehicle,
+    plate = RefuelState.plate,
+    station_id = RefuelState.stationId or 'none',
+    physical = RefuelState.physical == true,
+    pump = RefuelState.pump and RefuelState.pump.pumpKey or 'none',
+    vehicle_key = RefuelState.vehicleKey or 'none',
+    session_key = RefuelState.sessionKey or 'none',
+    target_liters = RefuelState.targetLiters or 'fill',
+    used_liters = RefuelState.usedLiters or 0.0,
+    progress_target = RefuelState.progressTarget or 0.0,
+    menu_session = RefuelState.menuSession and 'set' or 'none',
+    last_stop = RefuelState.lastStopReason or 'none'
+  }
+end
 
 exports('IsRefueling', function()
   return MZFuelRefuel.IsRefueling()
 end)
 
-exports('CanRefuel', function(vehicle)
-  return MZFuelRefuel.CanRefuel(vehicle)
+exports('CanRefuel', function(vehicle, physical)
+  return MZFuelRefuel.CanRefuel(vehicle, physical)
 end)
 
 validateRefuelConfig()

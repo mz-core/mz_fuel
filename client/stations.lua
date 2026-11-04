@@ -30,42 +30,6 @@ MZFuelStations.List = Config.Stations and Config.Stations.locations or {
   vec3(1784.324, 3330.55, 41.253)
 }
 
-local function drawHelp(text)
-  BeginTextCommandDisplayHelp('STRING')
-  AddTextComponentSubstringPlayerName(text)
-  EndTextCommandDisplayHelp(0, false, true, 1)
-end
-
-local function findNearestVehicle(maxDistance)
-  local ped = PlayerPedId()
-  local pedCoords = GetEntityCoords(ped)
-  local nearestVehicle = 0
-  local nearestDistance = tonumber(maxDistance) or 5.0
-
-  for _, vehicle in ipairs(GetGamePool('CVehicle')) do
-    if vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
-      local distance = #(pedCoords - GetEntityCoords(vehicle))
-      if distance <= nearestDistance then
-        nearestVehicle = vehicle
-        nearestDistance = distance
-      end
-    end
-  end
-
-  return nearestVehicle
-end
-
-local function getRefuelCandidateVehicle()
-  if Config.Refuel and Config.Refuel.allowInsideVehicle ~= false then
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
-    if vehicle ~= 0 then
-      return vehicle
-    end
-  end
-
-  return findNearestVehicle(tonumber(Config.Refuel and Config.Refuel.maxDistance) or 6.0)
-end
-
 function MZFuelStations.GetNearestStation()
   local ped = PlayerPedId()
   local coords = GetEntityCoords(ped)
@@ -107,51 +71,81 @@ CreateThread(function()
   end
 
   createStationBlips()
+end)
 
-  local waitUntil = GetGameTimer() + 5000
-  while MZFuelInteractions and MZFuelInteractions.IsResolved and not MZFuelInteractions.IsResolved() and GetGameTimer() < waitUntil do
-    Wait(100)
+local LegacyGeneration = 0
+
+local function drawHelp(message)
+  BeginTextCommandDisplayHelp('STRING')
+  AddTextComponentSubstringPlayerName(message)
+  EndTextCommandDisplayHelp(0, false, true, 1)
+end
+
+local function findNearestVehicle(maxDistance)
+  local ped = PlayerPedId()
+  local pedCoords = GetEntityCoords(ped)
+  local nearestVehicle = 0
+  local nearestDistance = tonumber(maxDistance) or 6.0
+
+  for _, vehicle in ipairs(GetGamePool('CVehicle')) do
+    if vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) and MZFuel.IsVehicleSupported(vehicle) then
+      local distance = #(pedCoords - GetEntityCoords(vehicle))
+      if distance <= nearestDistance then
+        nearestVehicle = vehicle
+        nearestDistance = distance
+      end
+    end
   end
 
-  local marker = Config.Stations.marker or {}
-  local markerType = tonumber(marker.type) or 1
-  local drawDistance = tonumber(marker.drawDistance) or 18.0
-  local radius = tonumber(marker.radius) or 4.0
-  local color = marker.color or {}
+  return nearestVehicle
+end
 
-  while true do
-    local waitMs = 1000
-    if MZFuelInteractions and MZFuelInteractions.ShouldUseMarker and not MZFuelInteractions.ShouldUseMarker() then
-      Wait(waitMs)
-    else
+function MZFuelStations.StopLegacyMarker()
+  LegacyGeneration = LegacyGeneration + 1
+end
+
+function MZFuelStations.StartLegacyMarker()
+  LegacyGeneration = LegacyGeneration + 1
+  local generation = LegacyGeneration
+
+  CreateThread(function()
+    while LegacyGeneration == generation do
+      local sleep = 500
       local ped = PlayerPedId()
-      local coords = GetEntityCoords(ped)
+      local markerCfg = (Config.Stations and Config.Stations.marker) or {}
 
-      for stationIndex, station in ipairs(MZFuelStations.List) do
-        local distance = #(coords - station)
-        if distance <= drawDistance then
-          waitMs = 0
+      if not IsPedInAnyVehicle(ped, false) and not IsEntityDead(ped) then
+        local coords = GetEntityCoords(ped)
+        local station, distance = MZFuelStations.GetNearestStation()
+
+        if station and distance and distance <= (tonumber(markerCfg.drawDistance) or 18.0) then
+          sleep = 0
+          local color = markerCfg.color or {}
+
           DrawMarker(
-            markerType,
+            tonumber(markerCfg.type) or 1,
             station.x, station.y, station.z - 1.0,
             0.0, 0.0, 0.0,
             0.0, 0.0, 0.0,
-            radius, radius, 0.35,
+            0.6, 0.6, 0.35,
             color.r or 57, color.g or 229, color.b or 140, color.a or 110,
             false, false, 2, false, nil, nil, false
           )
 
-          if distance <= radius then
-            local vehicle = getRefuelCandidateVehicle()
-            if vehicle ~= 0 and MZFuelRefuel.CanRefuel(vehicle) then
-              drawHelp('Pressione ~INPUT_CONTEXT~ para abastecer.')
-              if IsControlJustPressed(0, 38) and not MZFuelRefuel.IsRefueling() then
-                if Config.Refuel and Config.Refuel.useMenu == true and MZFuelMenu and MZFuelMenu.Open then
-                  MZFuelMenu.Open(vehicle, station)
-                else
-                  MZFuelRefuel.Start(vehicle, station, {
-                    stationId = stationIndex
-                  })
+          if distance <= (tonumber(markerCfg.radius) or 4.0) then
+            local vehicle = findNearestVehicle(tonumber(Config.Refuel and Config.Refuel.maxDistance) or 6.0)
+            if vehicle ~= 0 then
+              local canRefuel = MZFuelRefuel and MZFuelRefuel.CanRefuel and MZFuelRefuel.CanRefuel(vehicle)
+              if canRefuel == true and not (MZFuelRefuel.IsRefueling and MZFuelRefuel.IsRefueling()) then
+                local prompt = type(MZFuelText) == 'function' and MZFuelText('prompt.refuel', nil) or '[E] Abastecer'
+                if prompt == 'prompt.refuel' then prompt = '[E] Abastecer' end
+                drawHelp(prompt)
+                if IsControlJustPressed(0, 38) then
+                  if MZFuelMenu and MZFuelMenu.Open then
+                    MZFuelMenu.Open(vehicle, station)
+                  else
+                    MZFuelRefuel.Start(vehicle, station)
+                  end
                 end
               end
             end
@@ -159,10 +153,10 @@ CreateThread(function()
         end
       end
 
-      Wait(waitMs)
+      Wait(sleep)
     end
-  end
-end)
+  end)
+end
 
 exports('GetNearestStation', function()
   return MZFuelStations.GetNearestStation()

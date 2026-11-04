@@ -1,9 +1,7 @@
 MZFuelInteractions = MZFuelInteractions or {}
 
-local RegisteredInteractPoints = {}
 local ActiveMode = 'resolving'
-local TargetApiStatus = 'not_checked'
-local removeInteractPoints
+local TargetApiStatus = 'starting'
 
 local function interactionConfig()
   return Config.Interaction or {}
@@ -17,71 +15,21 @@ local function normalizeMode(value)
   return 'auto'
 end
 
-local function findNearestVehicle(maxDistance)
-  local ped = PlayerPedId()
-  local pedCoords = GetEntityCoords(ped)
-  local nearestVehicle = 0
-  local nearestDistance = tonumber(maxDistance) or 6.0
-
-  if Config.Refuel and Config.Refuel.allowInsideVehicle ~= false then
-    local currentVehicle = GetVehiclePedIsIn(ped, false)
-    if currentVehicle ~= 0 then
-      return currentVehicle
-    end
-  end
-
-  for _, vehicle in ipairs(GetGamePool('CVehicle')) do
-    if vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
-      local distance = #(pedCoords - GetEntityCoords(vehicle))
-      if distance <= nearestDistance then
-        nearestVehicle = vehicle
-        nearestDistance = distance
-      end
-    end
-  end
-
-  return nearestVehicle
+local function targetModeAllowed()
+  local cfg = interactionConfig()
+  local mode = normalizeMode(cfg.mode)
+  return mode == 'auto' or mode == 'target'
 end
 
-local function startRefuelAtStation(station, stationId)
-  if not station then
-    return false
-  end
-
-  local vehicle = findNearestVehicle(tonumber(Config.Refuel and Config.Refuel.maxDistance) or 6.0)
-  local ok, reason = false, 'vehicle_invalid'
-  if vehicle ~= 0 then
-    local canRefuel, canReason = MZFuelRefuel.CanRefuel(vehicle)
-    ok = canRefuel == true
-    reason = canReason or reason
-  end
-
-  if not ok then
-    if MZFuelNotify and MZFuelNotify.NotifyKey then
-      if reason == 'driver_required' or reason == 'not_driver' then
-        MZFuelNotify.NotifyKey('driverRequired', 'error', 'Entre no banco do motorista para abastecer.')
-      elseif reason == 'vehicle_full' then
-        MZFuelNotify.NotifyKey('vehicleFull', 'inform', 'O veiculo ja esta cheio.')
-      else
-        MZFuelNotify.NotifyKey('invalidVehicle', 'error', 'Veiculo invalido.')
-      end
-    end
-    return false
-  end
-
-  if Config.Refuel and Config.Refuel.useMenu == true and MZFuelMenu and MZFuelMenu.Open then
-    return MZFuelMenu.Open(vehicle, station)
-  end
-
-  return MZFuelRefuel.Start(vehicle, station, {
-    stationId = stationId
-  })
+local function interactModeAllowed()
+  local cfg = interactionConfig()
+  local mode = normalizeMode(cfg.mode)
+  return mode == 'auto' or mode == 'interact'
 end
 
 local function canUseTarget()
-  local cfg = interactionConfig()
-  local mode = normalizeMode(cfg.mode)
-  if mode ~= 'auto' and mode ~= 'target' then
+  if not targetModeAllowed() then
+    TargetApiStatus = 'mode_disabled'
     return false
   end
 
@@ -90,97 +38,44 @@ local function canUseTarget()
     return false
   end
 
-  -- mz_target 0.2.0 does not expose a public export/event for external point registration.
-  TargetApiStatus = 'no_public_point_api'
-  return false
+  return true
 end
 
 local function canUseInteract()
-  local cfg = interactionConfig()
-  local mode = normalizeMode(cfg.mode)
-  if mode ~= 'auto' and mode ~= 'interact' then
+  if not interactModeAllowed() then
     return false
   end
 
   return GetResourceState('mz_interact') == 'started'
 end
 
-local function addInteractPoints()
-  if not canUseInteract() then
-    return false
-  end
-
-  removeInteractPoints()
-
-  local marker = Config.Stations and Config.Stations.marker or {}
-  local drawDistance = tonumber(marker.drawDistance) or 18.0
-  local interactDistance = tonumber(marker.radius) or tonumber(Config.Refuel and Config.Refuel.maxDistance) or 4.0
-
-  for index, station in ipairs(Config.Stations and Config.Stations.locations or {}) do
-    local id = ('mz_fuel_station_%s'):format(index)
-    local ok, success, result = pcall(function()
-      return exports['mz_interact']:AddPoint({
-        id = id,
-        coords = station,
-        drawDistance = drawDistance,
-        interactDistance = interactDistance,
-        key = 38,
-        marker = {
-          enabled = true,
-          type = marker.type or 1,
-          size = vec3(interactDistance, interactDistance, 0.35),
-          color = marker.color or { r = 57, g = 229, b = 140, a = 110 }
-        },
-        text = {
-          enabled = true,
-          label = '[E] Abastecer'
-        },
-        event = {
-          type = 'client',
-          name = 'mz_fuel:client:interactRefuelStation',
-          args = { index }
-        }
-      })
-    end)
-
-    if ok and success == true then
-      RegisteredInteractPoints[#RegisteredInteractPoints + 1] = tostring(result or id)
-    end
-  end
-
-  return #RegisteredInteractPoints > 0
-end
-
-function removeInteractPoints()
-  if GetResourceState('mz_interact') ~= 'started' then
-    RegisteredInteractPoints = {}
-    return
-  end
-
-  for _, id in ipairs(RegisteredInteractPoints) do
-    pcall(function()
-      exports['mz_interact']:RemovePoint(id)
-    end)
-  end
-
-  RegisteredInteractPoints = {}
-end
-
 function MZFuelInteractions.ResolveMode()
   local cfg = interactionConfig()
   local mode = normalizeMode(cfg.mode)
-  local prefer = tostring(cfg.prefer or 'target'):lower()
 
   if mode == 'none' then
     return 'none'
   end
+
+  -- Sem abastecimento fisico nao existe bomba interativa. Preservamos o
+  -- comportamento legado de posto no modo marker.
+  if Config.Refuel and Config.Refuel.physical ~= true then
+    return 'marker'
+  end
+
+  local prefer = tostring(cfg.prefer or 'target'):lower()
 
   if mode == 'marker' then
     return 'marker'
   end
 
   if mode == 'target' then
-    return canUseTarget() and 'target' or ((cfg.fallbackMarker == true) and 'marker' or 'none')
+    if canUseTarget() then
+      return 'target'
+    end
+
+    TargetApiStatus = TargetApiStatus == 'mode_disabled' and 'mode_disabled' or 'resource_not_started'
+    return (cfg.fallbackMarker == true) and 'marker' or 'none'
   end
 
   if mode == 'interact' then
@@ -214,30 +109,82 @@ function MZFuelInteractions.IsResolved()
   return ActiveMode ~= 'resolving'
 end
 
+local function stopFallback()
+  if MZFuelPumps and MZFuelPumps.StopFallback then
+    MZFuelPumps.StopFallback()
+  end
+
+  if MZFuelStations and MZFuelStations.StopLegacyMarker then
+    MZFuelStations.StopLegacyMarker()
+  end
+end
+
+local function removeTarget()
+  if MZFuelPumps and MZFuelPumps.RemoveTarget then
+    MZFuelPumps.RemoveTarget()
+  end
+end
+
 function MZFuelInteractions.Refresh()
   if not Config.Stations or Config.Stations.enabled ~= true then
-    removeInteractPoints()
+    stopFallback()
+    removeTarget()
     ActiveMode = 'none'
     return ActiveMode
   end
 
-  removeInteractPoints()
+  stopFallback()
+  removeTarget()
+
   ActiveMode = MZFuelInteractions.ResolveMode()
 
+  if ActiveMode == 'target' then
+    local ok, reason = MZFuelPumps.RegisterTarget()
+    if ok == true then
+      TargetApiStatus = 'registered'
+    else
+      TargetApiStatus = tostring(reason or 'register_failed')
+      if canUseInteract() then
+        ActiveMode = 'interact'
+      elseif interactionConfig().fallbackMarker == true then
+        ActiveMode = 'marker'
+      else
+        ActiveMode = 'none'
+      end
+    end
+  end
+
   if ActiveMode == 'interact' then
-    if addInteractPoints() ~= true then
+    if MZFuelPumps.StartFallback('interact') ~= true then
       ActiveMode = interactionConfig().fallbackMarker == true and 'marker' or 'none'
     end
   end
 
+  if ActiveMode == 'marker' then
+    if Config.Refuel and Config.Refuel.physical == true then
+      if MZFuelStations and MZFuelStations.StopLegacyMarker then
+        MZFuelStations.StopLegacyMarker()
+      end
+      MZFuelPumps.StartFallback('marker')
+    elseif MZFuelStations and MZFuelStations.StartLegacyMarker then
+      MZFuelStations.StartLegacyMarker()
+    end
+  else
+    if MZFuelStations and MZFuelStations.StopLegacyMarker then
+      MZFuelStations.StopLegacyMarker()
+    end
+  end
+
+  if ActiveMode == 'none' then
+    stopFallback()
+  end
+
+  if Config.Debug == true then
+    print(('[mz_fuel][interactions] mode=%s target_api=%s'):format(tostring(ActiveMode), tostring(TargetApiStatus)))
+  end
+
   return ActiveMode
 end
-
-RegisterNetEvent('mz_fuel:client:interactRefuelStation', function(index)
-  index = tonumber(index) or 0
-  local station = Config.Stations and Config.Stations.locations and Config.Stations.locations[index] or nil
-  startRefuelAtStation(station, index)
-end)
 
 CreateThread(function()
   if not Config.Stations or Config.Stations.enabled ~= true then
@@ -245,6 +192,8 @@ CreateThread(function()
     return
   end
 
+  Wait(250)
+  MZFuelInteractions.Refresh()
   Wait(1000)
   MZFuelInteractions.Refresh()
 end)
@@ -255,7 +204,7 @@ AddEventHandler('onClientResourceStart', function(resourceName)
   end
 
   CreateThread(function()
-    Wait(500)
+    Wait(750)
     MZFuelInteractions.Refresh()
   end)
 end)
@@ -265,12 +214,8 @@ AddEventHandler('onClientResourceStop', function(resourceName)
     return
   end
 
-  if resourceName == 'mz_interact' then
-    RegisteredInteractPoints = {}
-  end
-
   CreateThread(function()
-    Wait(500)
+    Wait(750)
     MZFuelInteractions.Refresh()
   end)
 end)
@@ -280,5 +225,6 @@ AddEventHandler('onResourceStop', function(resourceName)
     return
   end
 
-  removeInteractPoints()
+  stopFallback()
+  removeTarget()
 end)

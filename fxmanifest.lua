@@ -10,12 +10,15 @@ version '1.0.0'
 ui_page 'web/index.html'
 
 shared_scripts {
-  'shared/config.lua'
+  'shared/config.lua',
+  'shared/locale.lua'
 }
 
 client_scripts {
   'client/fuel.lua',
   'client/notify.lua',
+  'client/pumps.lua',
+  'client/nozzle.lua',
   'client/menu.lua',
   'client/refuel.lua',
   'client/jerrycan.lua',
@@ -29,6 +32,7 @@ server_scripts {
   'server/payment.lua',
   'server/logs.lua',
   'server/exports.lua',
+  'server/pumps.lua',
   'server/main.lua',
   'server/jerrycan.lua',
   'server/menu.lua'
@@ -37,9 +41,13 @@ server_scripts {
 files {
   'web/index.html',
   'web/style.css',
-  'web/script.js'
+  'web/script.js',
+  'locales/*.json'
 }
 
 dependencies {
-  'mz_core'
+  'mz_core',
+  'mz_economy',
+  'mz_vehicles',
+  'mz_inventory'
 }
