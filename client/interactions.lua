@@ -155,6 +155,10 @@ function MZFuelInteractions.Refresh()
   end
 
   if ActiveMode == 'interact' then
+    if normalizeMode(interactionConfig().mode) == 'auto' and canUseTarget() then
+      local targetOk, reason = MZFuelPumps.RegisterTarget()
+      TargetApiStatus = targetOk == true and 'registered' or tostring(reason or 'register_failed')
+    end
     if MZFuelPumps.StartFallback('interact') ~= true then
       ActiveMode = interactionConfig().fallbackMarker == true and 'marker' or 'none'
     end

@@ -9,6 +9,8 @@ local FallbackGeneration = 0
 local DynamicPointId = nil
 local DynamicPointPumpKey = nil
 local DynamicPointLabel = nil
+local TankPointId = 'mz_fuel:tank'
+local TankPointKey = nil
 
 local function refuelConfig()
   return type(Config.Refuel) == 'table' and Config.Refuel or {}
@@ -376,10 +378,10 @@ end
 
 local function pumpPromptLabel()
   if MZFuelNozzle and MZFuelNozzle.IsHolding() then
-    return text('prompt.return', '[E] Devolver bico')
+    return text('pump.return', 'Devolver bico à bomba')
   end
 
-  return text('prompt.take', '[E] Pegar bico')
+  return text('pump.take', 'Pegar bico de combustível')
 end
 
 local function removeDynamicPoint()
@@ -406,22 +408,19 @@ local function ensureDynamicPoint(pump)
   end
 
   removeDynamicPoint()
-  DynamicPointPumpKey = pump.pumpKey
-  DynamicPointLabel = label
-  DynamicPointId = ('mz_fuel_pump_%s'):format(pump.pumpKey:gsub('[^%w_%-]', '_'))
+  local pointId = ('mz_fuel_pump_%s'):format(pump.pumpKey:gsub('[^%w_%-]', '_'))
 
-  pcall(function()
-    exports['mz_interact']:AddPoint({
-      id = DynamicPointId,
-      coords = pump.coords,
-      drawDistance = tonumber(refuelConfig().pumpDrawDistance) or 15.0,
-      interactDistance = tonumber(refuelConfig().pumpTargetDistance) or 2.6,
+  local ok, added = pcall(function()
+    return exports['mz_interact']:AddPoint({
+      id = pointId,
+      coords = pump.coords + vec3(0.0, 0.0, 0.8),
+      drawDistance = 4.0,
+      interactDistance = math.min(1.8, tonumber(refuelConfig().pumpTargetDistance) or 2.6),
       key = 38,
       marker = { enabled = false },
       blip = { enabled = false },
       text = {
-        enabled = true,
-        label = label
+        enabled = true, ui = true, discovery = true, keyLabel = 'E', label = label
       },
       event = {
         type = 'client',
@@ -430,6 +429,46 @@ local function ensureDynamicPoint(pump)
       }
     })
   end)
+  if ok and added == true then
+    DynamicPointId, DynamicPointPumpKey, DynamicPointLabel = pointId, pump.pumpKey, label
+  end
+end
+
+local function removeTankPoint()
+  if TankPointKey and GetResourceState('mz_interact') == 'started' then
+    pcall(function() exports['mz_interact']:RemovePoint(TankPointId) end)
+  end
+  TankPointKey = nil
+end
+
+local function ensureTankPoint(vehicle, tank, docked)
+  if not vehicle or vehicle == 0 or not tank then removeTankPoint(); return end
+  local canMenu = docked and MZFuelNozzle.CanOpenMenu(vehicle) == true
+  local canUndock = docked and MZFuelNozzle.CanUndock(vehicle) == true
+    and not (MZFuelRefuel and MZFuelRefuel.IsRefueling and MZFuelRefuel.IsRefueling())
+  local canDock = not docked and MZFuelNozzle.CanDock(vehicle) == true
+  if not canMenu and not canUndock and not canDock then removeTankPoint(); return end
+  local key = ('%s:%s:%s:%s'):format(vehicle, tostring(canDock), tostring(canMenu), tostring(canUndock))
+  if key == TankPointKey then return end
+  removeTankPoint()
+  local offset = GetOffsetFromEntityGivenWorldCoords(vehicle, tank.coords.x, tank.coords.y, tank.coords.z)
+  local function action(name, label)
+    return { label = label, event = { type = 'client', name = 'mz_fuel:client:interactTank', args = { vehicle, name } } }
+  end
+  local actions = {}
+  if canDock then actions[#actions + 1] = action('dock', text('tank.dock', 'Encaixar bico no tanque')) end
+  if canMenu then actions[#actions + 1] = action('menu', text('tank.refuel', 'Abastecer veículo')) end
+  if canUndock then actions[#actions + 1] = action('undock', text('tank.undock', 'Retirar bico do tanque')) end
+  local ok, added = pcall(function()
+    return exports['mz_interact']:AddPoint({
+      id = TankPointId, coords = tank.coords, follow = { entity = vehicle, offset = offset },
+      drawDistance = 4.0, interactDistance = math.min(1.8, tonumber(refuelConfig().tankAttachDistance) or 2.8),
+      marker = false, text = { enabled = true, ui = true, discovery = true, keyLabel = 'E',
+        label = #actions > 1 and 'Interagir' or actions[1].label },
+      actionMenu = #actions > 1, actions = #actions > 1 and actions or nil, event = actions[1].event
+    })
+  end)
+  if ok and added == true then TankPointKey = key end
 end
 
 local function drawSmallMarker(coords, color)
@@ -546,16 +585,28 @@ local function runInteractFallback(generation)
     while FallbackMode == 'interact' and FallbackGeneration == generation do
       local ped = PlayerPedId()
       local pump = nil
-
-      if not IsPedInAnyVehicle(ped, false) and not IsEntityDead(ped) and not (MZFuelNozzle and MZFuelNozzle.IsDocked()) then
-        pump = MZFuelPumps.GetNearestPump(GetEntityCoords(ped), tonumber(refuelConfig().pumpDrawDistance) or 15.0)
+      local vehicle, tank, docked
+      if not IsPedInAnyVehicle(ped, false) and not IsEntityDead(ped) and MZFuelNozzle then
+        docked = MZFuelNozzle.IsDocked()
+        if docked then
+          vehicle = MZFuelNozzle.GetVehicle()
+        elseif MZFuelNozzle.IsHolding() then
+          pump = MZFuelNozzle.GetPump()
+          vehicle = MZFuelNozzle.GetNearbyVehicleForDock()
+        else
+          pump = MZFuelPumps.GetNearestPump(GetEntityCoords(ped), tonumber(refuelConfig().pumpDrawDistance) or 15.0)
+        end
+        if vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
+          tank = MZFuelNozzle.GetTankWorldPosition(vehicle)
+        end
       end
 
       ensureDynamicPoint(pump)
+      ensureTankPoint(vehicle, tank, docked)
       Wait(500)
     end
 
-    removeDynamicPoint()
+    if FallbackGeneration == generation then removeDynamicPoint(); removeTankPoint() end
   end)
 end
 
@@ -563,10 +614,10 @@ function MZFuelPumps.StartFallback(mode)
   FallbackGeneration = FallbackGeneration + 1
   FallbackMode = mode
   removeDynamicPoint()
+  removeTankPoint()
 
   if mode == 'interact' and GetResourceState('mz_interact') == 'started' then
     runInteractFallback(FallbackGeneration)
-    runKeyFallback(FallbackGeneration, false)
     return true
   end
 
@@ -582,6 +633,7 @@ function MZFuelPumps.StopFallback()
   FallbackGeneration = FallbackGeneration + 1
   FallbackMode = nil
   removeDynamicPoint()
+  removeTankPoint()
 end
 
 function MZFuelPumps.GetFallbackMode()
@@ -632,6 +684,23 @@ RegisterNetEvent('mz_fuel:client:interactPump', function(x, y, z)
   local pump = MZFuelPumps.GetNearestPump(coords, 4.0)
   if pump then
     MZFuelPumps.ToggleAtPump(pump.entity)
+  end
+end)
+
+RegisterNetEvent('mz_fuel:client:interactTank', function(vehicle, action)
+  vehicle = tonumber(vehicle)
+  if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) or not MZFuelNozzle then return end
+  local ped = PlayerPedId()
+  if IsPedInAnyVehicle(ped, false) or IsEntityDead(ped) then return end
+  local tank = MZFuelNozzle.GetTankWorldPosition(vehicle)
+  if not tank or #(GetEntityCoords(ped) - tank.coords) > (tonumber(refuelConfig().tankAttachDistance) or 2.8) then return end
+  if action == 'dock' and MZFuelNozzle.CanDock(vehicle) then
+    MZFuelNozzle.Dock(vehicle)
+  elseif action == 'menu' and MZFuelNozzle.CanOpenMenu(vehicle) then
+    MZFuelNozzle.OpenMenu(vehicle)
+  elseif action == 'undock' and MZFuelNozzle.CanUndock(vehicle)
+    and not (MZFuelRefuel and MZFuelRefuel.IsRefueling and MZFuelRefuel.IsRefueling()) then
+    MZFuelNozzle.Undock('manual')
   end
 end)
 

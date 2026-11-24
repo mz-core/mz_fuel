@@ -280,7 +280,7 @@ Config.Payment = {
 
 Config.Interaction = {
   mode = 'auto', -- 'auto', 'target', 'interact', 'marker', 'none'
-  prefer = 'target',
+  prefer = 'interact',
   fallbackMarker = true
 }
 

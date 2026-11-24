@@ -23,9 +23,9 @@ Observação: o `fxmanifest.lua` declara `mz_core`, `mz_vehicles` e `mz_inventor
 
 ## Dependências opcionais
 
-- `mz_interact`: usado como fallback de interação quando `mz_target` não estiver disponível.
+- `mz_interact`: interação de proximidade na bomba e no tanque, com lista para abastecer ou retirar o bico.
 - `mz_notify`: usado para notificações/progresso quando iniciado.
-- `mz_target`: usado via `AddTargetModel`/`AddGlobalVehicle` nas bombas e no veículo. Quando não está iniciado, o `mz_fuel` cai para `mz_interact` ou para a tecla E no marker.
+- `mz_target`: usado via `AddTargetModel`/`AddGlobalVehicle` nas bombas e no veículo; no modo automático pode funcionar junto com o `mz_interact`.
 
 ## Ordem recomendada no server.cfg
 
@@ -151,16 +151,15 @@ Controla a camada de interação:
 ```lua
 Config.Interaction = {
   mode = 'auto', -- 'auto', 'target', 'interact', 'marker', 'none'
-  prefer = 'target',
+  prefer = 'interact',
   fallbackMarker = true
 }
 ```
 
-Prioridade real:
-
-1. `mz_target` em cada prop de bomba (`AddTargetModel`) e no veículo (`AddGlobalVehicle`).
-2. `mz_interact`, com um ponto dinâmico apenas na bomba mais próxima.
-3. Marker próprio pequeno na bomba e tecla contextual E/H.
+No modo automático, o `mz_interact` apresenta o círculo na bomba e no tanque;
+o `mz_target` também fica disponível quando iniciado. Sem `mz_interact`, o
+target assume a interação; sem nenhum dos dois, o marker próprio é usado se
+`fallbackMarker` estiver ativo.
 
 Com `mode = 'marker'`, somente marker é usado. Com `mode = 'none'`, nenhuma interação é criada. Com `physical = false`, o comportamento legado de posto no marker é preservado.
 
@@ -292,7 +291,7 @@ A garagem deve enviar o fuel junto com engine/body para persistência já existe
 - Pagamento: confirmar desconto por tick e bloqueio sem dinheiro.
 - Galão: habilitar `Config.JerryCan.enabled`, usar item perto de veículo válido.
 - mz_target: iniciar/parar o resource e confirmar re-registro/limpeza.
-- mz_interact: sem `mz_target`, confirmar ponto dinâmico por bomba.
+- mz_interact: confirmar círculo na bomba, encaixe no tanque e lista de ações após encaixar o bico, com e sem `mz_target`.
 - Marker: sem target/interact, confirmar marker pequeno e tecla E/H.
 - Debug: com `Config.Debug=true`, usar `/mfuel_diag` para bomba, veículo, bone, offset, sessão e motivo de cancelamento.
 - Debug com ACE: habilitar comandos e testar `/mfuel_get`, `/mfuel_set`, `/mfuel_refill`.
