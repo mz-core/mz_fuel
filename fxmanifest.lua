@@ -5,7 +5,7 @@ lua54 'yes'
 name 'mz_fuel'
 author 'Mazus'
 description 'Modular fuel system for the MZ ecosystem'
-version '1.0.0'
+version '1.0.2'
 
 ui_page 'web/index.html'
 
